@@ -1,0 +1,14 @@
+'use strict';
+const assert = require('node:assert/strict');
+const { settingsCloseDecision, calibrationResult, IDS, derive } = require('./app.js');
+assert.equal(typeof settingsCloseDecision, 'function', 'settings close must protect unapplied changes');
+assert.equal(settingsCloseDecision(true, false), 'confirm');
+assert.equal(settingsCloseDecision(false, true), 'wait');
+assert.equal(settingsCloseDecision(true, true), 'wait');
+assert.equal(settingsCloseDecision(false, false), 'close');
+assert.deepEqual(calibrationResult([{ zone: 'near', nearest: 120 }, { zone: 'unknown', nearest: null }, { zone: 'near', nearest: 140 }], 'near'), { count: 3, matched: 2, uncertain: 1, min: 120, max: 140 });
+assert.deepEqual(calibrationResult([{ zone: 'absent', nearest: null }], 'absent'), { count: 1, matched: 1, uncertain: 0, min: null, max: null });
+const paused = { [IDS.intent]: true, [IDS.monitoring]: false, [IDS.radar]: true, [IDS.zone]: 'Clear', [IDS.tv]: 'Active / picture visible', [IDS.status]: 'ON; paused: snoozed' };
+assert.match(derive(paused, true).helper, /暂时暂停/);
+assert.match(derive({ ...paused, [IDS.status]: 'ON; paused: external picture change; waiting for clear zone' }, true).helper, /手动恢复/);
+console.log('未应用修改保护、校准真实观测汇总与暂停文案检查通过');

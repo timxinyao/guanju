@@ -10,6 +10,9 @@ esphome:
     - tv_trial_settings_http.h
     - tv_trial_app_icon_data.h
     - tv_trial_icon_http.h
+    - tv_trial_parameter_audit.h
+    - tv_trial_diagnostics.h
+    - tv_trial_diagnostics_http.h
     - tv_trial_runtime.h
   on_boot:
     priority: -100
@@ -196,6 +199,21 @@ switch:
           id(trial_switch).publish_state(false);
 
 button:
+  - platform: template
+    name: Pause 10 Minutes
+    icon: mdi:pause
+    on_press:
+      - lambda: tv_trial::runtime.controller.snooze(600000, millis());
+  - platform: template
+    name: Pause 30 Minutes
+    icon: mdi:pause
+    on_press:
+      - lambda: tv_trial::runtime.controller.snooze(1800000, millis());
+  - platform: template
+    name: Resume Monitoring
+    icon: mdi:play
+    on_press:
+      - lambda: tv_trial::runtime.controller.resume(millis());
   - platform: template
     name: Restore Picture
     icon: mdi:television

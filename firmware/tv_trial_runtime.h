@@ -6,6 +6,9 @@
 #include "tv_trial_settings_storage.h"
 #include "tv_trial_settings_http.h"
 #include "tv_trial_icon_http.h"
+#include "tv_trial_parameter_audit.h"
+#include "tv_trial_diagnostics_http.h"
+#include "esp_random.h"
 #include "esphome/components/ld2410/ld2410.h"
 #include "esphome/components/number/number.h"
 #include "esphome/components/wifi/wifi_component.h"
@@ -27,7 +30,7 @@ namespace tv_trial {
 
 // Only this worker performs HTTP. It never reads or mutates controller state;
 // POD queue messages are the boundary to the ESPHome / UART main loop.
-class Runtime : public SettingsEndpoint {
+class Runtime : public SettingsEndpoint, public DiagnosticsEndpoint {
  public:
   using GateNumbers = std::array<esphome::number::Number *,9>;
   Controller controller;
@@ -48,6 +51,9 @@ class Runtime : public SettingsEndpoint {
     move_thresholds_=move_thresholds;
     still_thresholds_=still_thresholds;
     boot_at_ = esphome::millis();
+    std::snprintf(diagnostics_session_,sizeof(diagnostics_session_),"%08lx%08lx",
+      static_cast<unsigned long>(esp_random()),static_cast<unsigned long>(esp_random()));
+    diagnostics_history_.append(diagnostics_uptime_.update(boot_at_),"boot","session started");
     Settings saved; uint32_t revision=0;
     load_verified_settings(saved,revision);
     settings_=SettingsTransaction(saved,revision);
@@ -68,13 +74,25 @@ class Runtime : public SettingsEndpoint {
       settings_.abort("tv_worker_initialization_failed");
       publish_settings_();
       register_settings_http(*this);
+      publish_diagnostics_(boot_at_,true);
+      register_diagnostics_http(*this);
       ESP_LOGE("tv_trial", "Cannot start TV worker; monitoring stays paused");
       return;
     }
     started_ = true;
     register_settings_http(*this);
+    publish_diagnostics_(boot_at_,true);
+    register_diagnostics_http(*this);
     ESP_LOGI("tv_trial", "User intent=%s; monitoring waits for health; no wake / power commands",
       controller.enabled() ? "ON" : "OFF");
+  }
+
+  // HTTP copies only the cached POD snapshot. UART, controller and settings
+  // observations are made in publish_diagnostics_ on the main loop.
+  void diagnostics_snapshot(DiagnosticsSnapshot &out) override {
+    portENTER_CRITICAL(&diagnostics_lock_);
+    out=diagnostics_cache_;
+    portEXIT_CRITICAL(&diagnostics_lock_);
   }
 
   SettingsView settings_snapshot() override {
@@ -99,6 +117,8 @@ class Runtime : public SettingsEndpoint {
         case RadarEvent::Periodic:
           last_periodic_at_ = now;
           periodic_seen_ = true;
+          ++sample_sequence_;
+          last_sample_uptime_=diagnostics_uptime_.update(now);
           controller.radar_frame(now, frames_.present(), frames_.measurement_known());
           break;
         case RadarEvent::Parameters:
@@ -129,8 +149,8 @@ class Runtime : public SettingsEndpoint {
   }
 
   void loop() {
-    if (!started_) return;
     uint32_t now = esphome::millis();
+    if (!started_) { publish_diagnostics_(now); return; }
     controller.set_link(esphome::wifi::global_wifi_component->is_connected(), now);
     Reply reply{};
     if (xQueueReceive(replies_, &reply, 0) == pdTRUE) {
@@ -140,6 +160,10 @@ class Runtime : public SettingsEndpoint {
         else controller.fail_query(reply.request.token, now);
       } else {
         controller.complete_command(reply.request.token, now, reply.outcome);
+        const char *detail=reply.request.kind==RpcKind::Hide?
+          (reply.outcome==Outcome::Success?"hide acknowledged":reply.outcome==Outcome::Rejected?"hide rejected":"hide uncertain"):
+          (reply.outcome==Outcome::Success?"restore acknowledged":reply.outcome==Outcome::Rejected?"restore rejected":"restore uncertain");
+        diagnostics_history_.append(diagnostics_uptime_.update(now),"command",detail);
       }
       if (reply.outcome != Outcome::Success)
         ESP_LOGW("tv_trial", "TV RPC failed / uncertain (HTTP %d); checking state before recovery", reply.http_code);
@@ -152,10 +176,13 @@ class Runtime : public SettingsEndpoint {
     if (mailbox_.snapshot().status!=SettingsStatus::Ready) controller.set_radar_ready(false,now);
     const auto request = controller.next(now);
     portEXIT_CRITICAL(&settings_lock_);
+    if(request.kind==RpcKind::Hide || request.kind==RpcKind::Restore)
+      diagnostics_history_.append(diagnostics_uptime_.update(now),"command",request.kind==RpcKind::Hide?"hide requested":"restore requested");
     if (request.kind != RpcKind::None && xQueueSend(requests_, &request, 0) != pdTRUE) {
       if (request.kind == RpcKind::Query) controller.fail_query(request.token, now);
       else controller.complete_command(request.token, now, Outcome::Uncertain);
     }
+    publish_diagnostics_(now);
   }
 
   std::string range_status() const {
@@ -409,7 +436,7 @@ class Runtime : public SettingsEndpoint {
             controller.invalidate_radar_measurement(esphome::millis());
             controller.configure_timing(settings_.saved().near_ms,settings_.saved().clear_ms,esphome::millis());
             controller.set_radar_ready(true,esphome::millis());
-            last_parameter_check_=esphome::millis();
+            parameter_audit_.verified(esphome::millis(),hardware_.parameter_sequence,hardware_.resolution_sequence);
             ESP_LOGI("tv_trial","Detection settings verified and saved; revision=%lu",
               static_cast<unsigned long>(settings_.revision()));
           }
@@ -422,14 +449,88 @@ class Runtime : public SettingsEndpoint {
       if (!current_hardware_matches_()) {
         settings_.abort("hardware_configuration_changed");
         controller.set_radar_ready(false,now);
-      } else if (now-last_parameter_check_>=30000) {
-        last_parameter_check_=now;
-        radar_->read_all_info();
+      } else {
+        switch(parameter_audit_.next(now,hardware_.parameter_sequence,hardware_.resolution_sequence)) {
+          case AuditAction::ReadAll:
+            radar_->read_all_info();
+            break;
+          case AuditAction::Failed:
+            settings_.abort("parameter_audit_timeout");
+            controller.set_radar_ready(false,now);
+            break;
+          default: break;
+        }
       }
     }
     if (!settings_.busy() && !settings_.ready()) controller.set_radar_ready(false,now);
     publish_settings_();
   }
+
+  void publish_diagnostics_(uint32_t now,bool force=false) {
+    const uint64_t uptime=diagnostics_uptime_.update(now);
+    const bool fresh=controller.radar_fresh(now);
+    const auto zone=frames_.scene(fresh);
+    const bool effective=controller.effective(now);
+    const bool audit_pending=parameter_audit_.pending(),audit_failed=parameter_audit_.failed();
+    const uint16_t state_bits=static_cast<uint16_t>((controller.enabled()?1:0)|(effective?2:0)|
+      (controller.owns_picture()?4:0)|(controller.external_override()?8:0)|(controller.snoozed(now)?16:0)|
+      (fresh?32:0)|(controller.tv_fresh(now)?64:0));
+    if(!diagnostics_observed_ || zone!=diagnostics_previous_zone_)
+      diagnostics_history_.append(uptime,"zone",diagnostics_zone(zone));
+    if(!diagnostics_observed_ || state_bits!=diagnostics_previous_bits_ ||
+        std::strncmp(diagnostics_previous_reason_,controller.status(),sizeof(diagnostics_previous_reason_))!=0)
+      diagnostics_history_.append(uptime,"state",controller.status());
+    if(!diagnostics_observed_ || settings_.phase()!=diagnostics_previous_phase_)
+      diagnostics_history_.append(uptime,"settings",settings_phase_(settings_.phase(),settings_.gate_index()));
+    const uint8_t audit_state=audit_failed?2:audit_pending?1:0;
+    if(!diagnostics_observed_ || audit_state!=diagnostics_previous_audit_)
+      diagnostics_history_.append(uptime,"audit",audit_failed?"failed":audit_pending?"pending":"idle");
+    diagnostics_observed_=true; diagnostics_previous_zone_=zone; diagnostics_previous_bits_=state_bits;
+    diagnostics_previous_phase_=settings_.phase(); diagnostics_previous_audit_=audit_state;
+    std::snprintf(diagnostics_previous_reason_,sizeof(diagnostics_previous_reason_),"%s",controller.status());
+    if(!force && diagnostics_published_ && now-diagnostics_at_<1000) return;
+    diagnostics_published_=true; diagnostics_at_=now;
+    DiagnosticsSnapshot view;
+    std::memcpy(view.session_id,diagnostics_session_,sizeof(view.session_id));
+    std::snprintf(view.reason,sizeof(view.reason),"%s",controller.status());
+    view.sequence=++diagnostics_sequence_; view.uptime_ms=uptime;
+    view.sample_sequence=sample_sequence_;
+    view.sample_at_ms=last_sample_uptime_;
+    view.config_revision=settings_.revision();
+    view.near_threshold_cm=settings_.saved().distance_cm;
+    view.release_threshold_cm=static_cast<uint16_t>(settings_.saved().distance_cm+RadarFrames::RELEASE_MARGIN_CM);
+    view.zone=zone; view.radar_fresh=fresh;
+    view.moving_valid=fresh && frames_.moving_valid(); view.still_valid=fresh && frames_.still_valid();
+    view.moving_cm=view.moving_valid?frames_.moving_distance_cm():0;
+    view.still_cm=view.still_valid?frames_.still_distance_cm():0;
+    view.measurement_known=fresh && controller.radar_measurement_known();
+    view.wifi_connected=esphome::wifi::global_wifi_component->is_connected();
+    view.tv_fresh=controller.tv_fresh(now); view.settings_ready=settings_.ready();
+    view.audit_pending=audit_pending; view.audit_failed=audit_failed;
+    view.intent_enabled=controller.enabled(); view.monitoring=effective;
+    view.power=controller.power(); view.mode=controller.mode();
+    view.owns_picture_off=controller.owns_picture();
+    view.snooze_remaining_ms=controller.snooze_remaining_ms(now);
+    view.external_override=controller.external_override();
+    diagnostics_history_.copy_to(view);
+    portENTER_CRITICAL(&diagnostics_lock_);
+    diagnostics_cache_=view;
+    portEXIT_CRITICAL(&diagnostics_lock_);
+  }
+
+  ParameterAudit parameter_audit_{};
+  DiagnosticsHistory diagnostics_history_{};
+  DiagnosticsUptime diagnostics_uptime_{};
+  DiagnosticsSnapshot diagnostics_cache_{};
+  portMUX_TYPE diagnostics_lock_=portMUX_INITIALIZER_UNLOCKED;
+  char diagnostics_session_[17]{},diagnostics_previous_reason_[96]{};
+  uint32_t diagnostics_at_{0},diagnostics_sequence_{0},sample_sequence_{0};
+  uint64_t last_sample_uptime_{0};
+  bool diagnostics_published_{false},diagnostics_observed_{false};
+  uint16_t diagnostics_previous_bits_{0};
+  uint8_t diagnostics_previous_audit_{0};
+  ScenePresence diagnostics_previous_zone_{ScenePresence::Unavailable};
+  SettingsPhase diagnostics_previous_phase_{SettingsPhase::Error};
 
   RadarFrames frames_{};
   RadarParameters original_{};
@@ -441,7 +542,7 @@ class Runtime : public SettingsEndpoint {
   bool boot_reconcile_{true};
   bool started_{false}, original_seen_{false}, original_resolution_seen_{false}, periodic_seen_{false},original_logged_{false};
   uint8_t original_resolution_{0xFF};
-  uint32_t boot_at_{0}, last_parameter_check_{0}, last_periodic_at_{0};
+  uint32_t boot_at_{0}, last_periodic_at_{0};
   esphome::ld2410::LD2410Component *radar_{nullptr};
   esphome::number::Number *move_{nullptr}, *still_{nullptr}, *timeout_{nullptr};
   GateNumbers move_thresholds_{},still_thresholds_{};
