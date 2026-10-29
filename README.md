@@ -55,6 +55,13 @@ The original illustration is in Chinese. It shows **logical connections, not the
 
 ## Build your own
 
+Clone the project from GitHub:
+
+```sh
+git clone https://github.com/timxinyao/guanju.git
+cd guanju
+```
+
 1. [Check the TV API](docs/en/compatibility.md), obtain the hardware and wire it with power disconnected.
 2. [Prepare your computer](docs/en/getting-started.md): Python 3.12–3.14, preferably 3.13, and the pinned ESPHome version.
 3. Copy `firmware/secrets.example.yaml` to local `firmware/secrets.yaml`. Enter your **2.4GHz Wi-Fi** credentials, fallback access-point password, TV address and PSK. This file is ignored by Git; never paste it into an AI chat or issue.
@@ -91,7 +98,7 @@ Absence delay and recovery confirmation add up, with additional network, polling
 | Understand the state machine, threads and API | [Architecture](docs/en/architecture.md) | [架构](docs/architecture.md) |
 | Preview the web interface on your computer | [Local UI preview](docs/en/development-ui.md) | [本地 UI 预览](docs/development-ui.md) |
 | Contribute changes | [Contributing](CONTRIBUTING.md) | [贡献指南](CONTRIBUTING.zh-CN.md) |
-| Publish the repository on GitHub | [Publishing handoff](docs/en/publishing.md) | [发布交接](docs/publishing.md) |
+| Maintain the GitHub repository | [Publishing and maintenance](docs/en/publishing.md) | [发布与维护](docs/publishing.md) |
 
 AI coding agents should also read [AGENTS.md](AGENTS.md), the canonical project instructions, currently written in Chinese. Each translated guide links to its counterpart at the top. Language links switch repository documents; they do not change the language of the device interface.
 
@@ -105,7 +112,7 @@ python -m pip install -r requirements.txt
 python tools/verify_project.py --config
 ```
 
-Checks also require Node.js 22, POSIX `sh` and a C++17 compiler with ASan/UBSan support. WSL2 is recommended for the complete development checks on Windows; native Windows USB flashing is covered in the setup guide. These checks do not connect to or flash hardware. `--config` validates temporary copies with example secrets, without overwriting your private configuration. CI uses the same checks; hosted CI results must be confirmed after publication.
+Checks also require Node.js 22, POSIX `sh` and a C++17 compiler with ASan/UBSan support. WSL2 is recommended for the complete development checks on Windows; native Windows USB flashing is covered in the setup guide. These checks do not connect to or flash hardware. `--config` validates temporary copies with example secrets, without overwriting your private configuration. CI uses the same checks; inspect the actual GitHub Actions run for its result.
 
 ## Network, license and project status
 
