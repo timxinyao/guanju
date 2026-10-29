@@ -8,6 +8,7 @@
 - `firmware/tv_trial_*.h`：判定、参数事务、存储、HTTP 和运行时；`firmware/ui/`：无外网依赖的原生 JS/CSS。
 - `tools/verify_project.py --config`：完整无设备验证；`requirements.txt` 固定 ESPHome。开发需 Python、Node、POSIX sh、C++17 编译器，详见 README。
 - `tools/ui_preview.py` 的服务启停、模式隔离和运行登记按 [本地预览说明](docs/development-ui.md) 操作。
+- 交付界面或动画改动时，默认提供真实浏览器连续录制、可直接播放的 MP4 预览，并明确模拟与真实设备的验证范围；不以用户打开小板网页作为验收前提，也不用稀疏截图拼接冒充实时动画。
 - 修改图标后运行 `python tools/embed_app_icon.py firmware/ui/apple-touch-icon.png firmware/tv_trial_app_icon_data.h`，保持嵌入头一致。
 
 ## 必须保持的边界

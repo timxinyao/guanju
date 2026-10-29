@@ -242,19 +242,23 @@ class Fixture:
                     client.put(None)
                 return
             epoch = self.epoch
-            changes = {
+            radar_changes = {
                 'binary_sensor/Radar Data Fresh': name != 'Unavailable',
                 'binary_sensor/Radar Measurement Known': name not in ('Unknown', 'Unavailable'),
-                'binary_sensor/TV Connected': name not in ('Unavailable', 'TVUnknown', 'TVFailure'),
                 'binary_sensor/Moving Target': name in ('Near', 'Far'),
                 'binary_sensor/Still Target': False,
                 'sensor/Moving Distance': 100 if name == 'Near' else 250 if name == 'Far' else 0,
                 'sensor/Detection Distance': 100 if name == 'Near' else 250 if name == 'Far' else 0,
                 'text_sensor/Near Zone': {'Near': 'Presence', 'Unknown': 'Unknown', 'Unavailable': 'Unavailable'}.get(name, 'Clear'),
                 'text_sensor/Scene Presence': {'Near': 'Near', 'Far': 'Far', 'Unknown': 'Unknown', 'Unavailable': 'Unavailable'}.get(name, 'Absent'),
+            }
+            changes = {
+                'binary_sensor/TV Connected': name not in ('Unavailable', 'TVUnknown', 'TVFailure'),
                 'text_sensor/TV Status': {'Standby': 'Standby (will not wake)', 'PictureOff': 'Active / pictureOff', 'RestoreTransition': 'Active / pictureOff', 'Unavailable': 'Unavailable / state expired', 'TVUnknown': 'Unavailable / state expired', 'TVFailure': 'Unavailable / state expired'}.get(name, 'Active / picture visible'),
                 'binary_sensor/Trial Owns Picture Off': (True if name in ('PictureOff', 'RestoreTransition') else False if name in ('Normal', 'Near', 'Far', 'Standby', 'HideTransition') else self.states['binary_sensor/Trial Owns Picture Off']),
             }
+            if name not in ('PictureOff', 'HideTransition', 'RestoreTransition'):
+                changes.update(radar_changes)
             if name in ('Normal', 'Near', 'Far', 'Standby', 'HideTransition', 'RestoreTransition', 'TVUnknown', 'TVFailure'):
                 self.recovery_pending = False
             self.update(changes)

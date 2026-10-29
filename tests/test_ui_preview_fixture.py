@@ -58,6 +58,37 @@ class FixtureScenariosTest(unittest.TestCase):
         self.assertEqual(self.fixture.states['text_sensor/Trial Status'], 'ON; paused: TV communication failed')
         self.assertFalse(self.fixture.states['binary_sensor/Trial Monitoring'])
 
+    def test_picture_controls_preserve_radar_state(self):
+        radar_keys = (
+            'binary_sensor/Radar Data Fresh', 'binary_sensor/Radar Measurement Known',
+            'binary_sensor/Moving Target', 'binary_sensor/Still Target',
+            'sensor/Moving Distance', 'sensor/Still Distance', 'sensor/Detection Distance',
+            'text_sensor/Near Zone', 'text_sensor/Scene Presence',
+        )
+        for start, expected in (('Near', 'Near'), ('Far', 'Far'), ('Normal', 'Absent'),
+                                ('Unknown', 'Unknown'), ('Unavailable', 'Unavailable')):
+            for action in ('PictureOff', 'HideTransition', 'RestoreTransition'):
+                with self.subTest(start=start, action=action):
+                    self.fixture.scenario(start)
+                    before = {key: self.fixture.states[key] for key in radar_keys}
+                    self.assertEqual(before['text_sensor/Scene Presence'], expected)
+                    self.fixture.scenario(action)
+                    self.assertEqual({key: self.fixture.states[key] for key in radar_keys}, before)
+                    for _, callback in sorted(self.scheduler.callbacks, key=lambda item: item[0]):
+                        callback()
+                        self.assertEqual({key: self.fixture.states[key] for key in radar_keys}, before)
+                    self.scheduler.callbacks.clear()
+                    self.assertEqual(self.fixture.states['text_sensor/TV Status'],
+                                     'Active / picture visible' if action == 'RestoreTransition'
+                                     else 'Active / pictureOff')
+
+    def test_normal_can_clear_presence_after_picture_off(self):
+        self.fixture.scenario('Near')
+        self.fixture.scenario('PictureOff')
+        self.fixture.scenario('Normal')
+        self.assertEqual(self.fixture.states['text_sensor/Scene Presence'], 'Absent')
+        self.assertFalse(self.fixture.states['binary_sensor/Moving Target'])
+
 
 if __name__ == '__main__':
     unittest.main()

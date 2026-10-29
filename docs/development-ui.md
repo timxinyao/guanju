@@ -13,7 +13,7 @@ python3 tools/ui_preview.py stop
 
 启动先实际绑定端口 0，命令输出的地址即实际地址；打开该地址查看 UI，在同一地址的 `/_fixture` 页面切换模拟情景。Normal、Near、Far、Standby、Unknown、Unavailable、PictureOff、Expired 和 Offline 均为服务端模拟；Offline 中断 SSE 并使实体 REST 返回 503，控制页仍可恢复。Expired 保持连接但停止事件和心跳，供验证状态超时。Restore Picture 模拟先关闭试用，再短暂等待后恢复画面。仅供 UI 行为验证，不能代表真实设备结果。
 
-**HideTransition** 从画面正常开始，经 1.5 秒电视状态不可用后确认息屏；**RestoreTransition** 反向模拟恢复。**TVUnknown** 保持 SSE 在线而电视状态持续不可用，供检查超过 5 秒的展示；**TVFailure** 模拟明确的电视通信失败。切换场景会使先前过渡定时器失效。它们均为模拟，不向真实设备发命令。可离线运行 `python3 -m unittest discover -s tests -p test_ui_preview_fixture.py` 检查夹具的过渡及取消。
+**PictureOff**、**HideTransition** 和 **RestoreTransition** 保留当前雷达状态，因此可先选择 Near、Far、Normal 或 Unknown，再模拟电视画面变化；没有雷达目标时不会凭空显示人物。HideTransition 从画面正常开始，经 1.5 秒电视状态不可用后确认息屏；RestoreTransition 反向模拟恢复。**TVUnknown** 保持 SSE 在线而电视状态持续不可用，供检查超过 5 秒的展示；**TVFailure** 模拟明确的电视通信失败。切换场景会使先前过渡定时器失效。它们均为模拟，不向真实设备发命令。可离线运行 `python3 -m unittest discover -s tests -p test_ui_preview_fixture.py` 检查夹具的过渡及取消。
 
 运行登记为 `output/ui-preview-state.json`，含 PID、进程创建时间、项目根目录、模式、实际地址及日志路径；日志在 `output/ui-preview.log`，数据只在进程内。状态和停止命令核验登记对应的 PID、创建时间与进程命令；登记无法核验时保留现场，不按端口猜测停止目标。异常退出后，先检查登记中的 PID 是否已退出或被重用，再手动移除失效登记。启动和状态不自动接管未知进程。主会话负责停止本次启动的实例，日志保留。
 
