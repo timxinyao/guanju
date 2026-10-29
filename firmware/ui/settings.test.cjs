@@ -1,0 +1,20 @@
+'use strict';
+const assert = require('node:assert/strict');
+const { validateSettings, sameSettings, pollSettings, boundedRequest } = require('./app.js');
+const base = { distance_cm: 150, near_ms: 3000, radar_timeout_s: 1, clear_ms: 1000, sensitivity: 'standard' };
+const data = (revision, status, settings = base) => ({ revision, status, settings });
+(async () => {
+  assert.equal(validateSettings(base), true);
+  assert.equal(validateSettings({ ...base, distance_cm: 155 }), false);
+  assert.equal(validateSettings({ ...base, radar_timeout_s: 0 }), false);
+  assert.equal(sameSettings(base, { ...base, near_ms: 4000 }), false);
+  let i = 0;
+  const result = await pollSettings(async () => [data(4, 'applying'), data(5, 'ready')][i++], 4, base, async () => {}, 3);
+  assert.equal(result.revision, 5);
+  await assert.rejects(pollSettings(async () => data(4, 'error'), 4, base, async () => {}, 2), /device-error/);
+  await assert.rejects(pollSettings(async () => data(5, 'ready', { ...base, near_ms: 4000 }), 4, base, async () => {}, 2), /conflict/);
+  await assert.rejects(pollSettings(async () => data(6, 'ready'), 4, base, async () => {}, 2), /conflict/);
+  await assert.rejects(pollSettings(async () => data(4, 'applying'), 4, base, async () => {}, 2), /timeout/);
+  await assert.rejects(boundedRequest(async () => ({ ok: false, status: 404 }), '/settings', {}, true), error => error.status === 404);
+  console.log('参数边界、验证完成、失败和冲突检查通过');
+})().catch(error => { console.error(error); process.exitCode = 1; });

@@ -1,0 +1,275 @@
+esphome:
+  name: tv-radar
+  # Separate build directory preserves the observer binaries / configuration.
+  build_path: build/tv-trial
+  includes:
+    - tv_trial_controller.h
+    - tv_trial_radar_protocol.h
+    - tv_trial_settings.h
+    - tv_trial_settings_storage.h
+    - tv_trial_settings_http.h
+    - tv_trial_app_icon_data.h
+    - tv_trial_icon_http.h
+    - tv_trial_runtime.h
+  on_boot:
+    priority: -100
+    then:
+      - script.execute:
+          id: initialize_trial
+          tv_host: !secret sony_tv_host
+          tv_psk: !secret sony_tv_psk
+
+esp32:
+  board: esp32-c3-devkitm-1
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      # HTTPD can hold 7 clients plus listen/control, with OTA, mDNS and the
+      # custom TV RPC client sharing this pool. The implicit 10 is insufficient.
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+    advanced:
+      include_builtin_idf_components:
+        - esp_http_client
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+  logs:
+    http_request: NONE
+
+preferences:
+  # Save explicit ON/OFF changes promptly; transient health never changes intent.
+  flash_write_interval: 0s
+
+wifi:
+  ssid: !secret home_wifi_ssid
+  password: !secret home_wifi_password
+  power_save_mode: NONE
+  reboot_timeout: 0s
+  ap:
+    ssid: TV-Radar-Setup
+    password: !secret radar_ap_password
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+  version: 2
+  local: false
+  js_url: ''
+  css_url: ''
+  js_include: ui/app.js
+  css_include: ui/app.css
+  log: false
+  ota: false
+
+json:
+
+uart:
+  tx_pin: GPIO21
+  rx_pin: GPIO20
+  baud_rate: 256000
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+  rx_buffer_size: 2048
+  debug:
+    direction: RX
+    dummy_receiver: false
+    after:
+      bytes: 1
+    sequence:
+      - lambda: tv_trial::runtime.feed(bytes);
+
+ld2410:
+  id: radar
+
+# Driver state is private; /settings applies complete validated transactions.
+number:
+  - platform: ld2410
+    timeout:
+      id: radar_timeout
+      internal: true
+    max_move_distance_gate:
+      id: radar_max_move
+      internal: true
+    max_still_distance_gate:
+      id: radar_max_still
+      internal: true
+    g0:
+      move_threshold:
+        id: g0_move
+        internal: true
+      still_threshold:
+        id: g0_still
+        internal: true
+    g1:
+      move_threshold:
+        id: g1_move
+        internal: true
+      still_threshold:
+        id: g1_still
+        internal: true
+    g2:
+      move_threshold:
+        id: g2_move
+        internal: true
+      still_threshold:
+        id: g2_still
+        internal: true
+    g3:
+      move_threshold:
+        id: g3_move
+        internal: true
+      still_threshold:
+        id: g3_still
+        internal: true
+    g4:
+      move_threshold:
+        id: g4_move
+        internal: true
+      still_threshold:
+        id: g4_still
+        internal: true
+    g5:
+      move_threshold:
+        id: g5_move
+        internal: true
+      still_threshold:
+        id: g5_still
+        internal: true
+    g6:
+      move_threshold:
+        id: g6_move
+        internal: true
+      still_threshold:
+        id: g6_still
+        internal: true
+    g7:
+      move_threshold:
+        id: g7_move
+        internal: true
+      still_threshold:
+        id: g7_still
+        internal: true
+    g8:
+      move_threshold:
+        id: g8_move
+        internal: true
+      still_threshold:
+        id: g8_still
+        internal: true
+
+script:
+  - id: initialize_trial
+    parameters:
+      tv_host: string
+      tv_psk: string
+    then:
+      - lambda: |-
+          tv_trial::runtime.begin(tv_host, tv_psk, id(radar),
+            id(radar_max_move), id(radar_max_still), id(radar_timeout),
+            {id(g0_move), id(g1_move), id(g2_move), id(g3_move), id(g4_move), id(g5_move), id(g6_move), id(g7_move), id(g8_move)},
+            {id(g0_still), id(g1_still), id(g2_still), id(g3_still), id(g4_still), id(g5_still), id(g6_still), id(g7_still), id(g8_still)});
+
+interval:
+  - interval: 100ms
+    then:
+      - lambda: tv_trial::runtime.loop();
+
+switch:
+  - platform: template
+    name: TV Trial
+    id: trial_switch
+    icon: mdi:television-off
+    restore_mode: RESTORE_DEFAULT_OFF
+    lambda: return tv_trial::runtime.controller.enabled();
+    turn_on_action:
+      - lambda: |-
+          tv_trial::runtime.controller.set_enabled(true, millis());
+          id(trial_switch).publish_state(tv_trial::runtime.controller.enabled());
+    turn_off_action:
+      - lambda: |-
+          tv_trial::runtime.controller.set_enabled(false, millis());
+          id(trial_switch).publish_state(false);
+
+button:
+  - platform: template
+    name: Restore Picture
+    icon: mdi:television
+    on_press:
+      - lambda: |-
+          tv_trial::runtime.controller.request_restore(millis());
+          id(trial_switch).publish_state(false);
+
+binary_sensor:
+  - platform: template
+    name: Trial Monitoring
+    lambda: return tv_trial::runtime.controller.effective(millis());
+  - platform: template
+    name: Radar Data Fresh
+    lambda: return tv_trial::runtime.controller.radar_fresh(millis());
+  - platform: template
+    name: Radar Measurement Known
+    lambda: |-
+      return tv_trial::runtime.controller.radar_fresh(millis()) &&
+        tv_trial::runtime.controller.radar_measurement_known();
+  - platform: template
+    name: TV Connected
+    lambda: return tv_trial::runtime.controller.tv_fresh(millis());
+  - platform: template
+    name: Trial Owns Picture Off
+    lambda: return tv_trial::runtime.controller.owns_picture();
+  - platform: ld2410
+    has_moving_target:
+      name: Moving Target
+    has_still_target:
+      name: Still Target
+
+sensor:
+  - platform: ld2410
+    moving_distance:
+      name: Moving Distance
+    still_distance:
+      name: Still Distance
+    detection_distance:
+      name: Detection Distance
+  - platform: wifi_signal
+    name: WiFi Signal
+    update_interval: 10s
+  - platform: uptime
+    name: Uptime
+    update_interval: 10s
+
+text_sensor:
+  - platform: template
+    name: Scene Presence
+    update_interval: 1s
+    lambda: return std::string(tv_trial::runtime.scene_presence());
+  - platform: template
+    name: Near Zone
+    update_interval: 1s
+    lambda: |-
+      if (!tv_trial::runtime.controller.radar_fresh(millis())) return {"Unavailable"};
+      if (!tv_trial::runtime.controller.radar_measurement_known()) return {"Unknown"};
+      return tv_trial::runtime.controller.present() ? std::string("Presence") : std::string("Clear");
+  - platform: template
+    name: Trial Status
+    update_interval: 1s
+    lambda: return std::string(tv_trial::runtime.controller.status());
+  - platform: template
+    name: Near Zone Range
+    update_interval: 1s
+    lambda: return std::string(tv_trial::runtime.range_status());
+  - platform: template
+    name: TV Status
+    update_interval: 1s
+    lambda: return tv_trial::runtime.tv_status();
+  - platform: ld2410
+    version:
+      name: Radar Firmware Version
+  - platform: wifi_info
+    ip_address:
+      name: IP Address

@@ -1,0 +1,38 @@
+packages:
+  radar: !include radar-observer.yaml
+
+esphome:
+  name: tv-radar
+
+logger:
+  logs:
+    wifi: INFO
+
+wifi:
+  ssid: !secret home_wifi_ssid
+  password: !secret home_wifi_password
+  power_save_mode: NONE
+  reboot_timeout: 0s
+  ap:
+    ssid: TV-Radar-Setup
+    password: !secret radar_ap_password
+
+web_server:
+  port: 80
+  version: 2
+  local: true
+  log: false
+  ota: false
+
+sensor:
+  - platform: wifi_signal
+    name: WiFi Signal
+    update_interval: 10s
+  - platform: uptime
+    name: Uptime
+    update_interval: 10s
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: IP Address

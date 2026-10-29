@@ -1,0 +1,47 @@
+esphome:
+  name: radar-observer
+
+esp32:
+  board: esp32-c3-devkitm-1
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+# USB 日志与 GPIO20/21 上的雷达硬件 UART 分开。
+# 2026.10.1 的实体状态日志需要 VERBOSE。
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: VERBOSE
+
+uart:
+  tx_pin: GPIO21
+  rx_pin: GPIO20
+  baud_rate: 256000
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+
+ld2410:
+
+binary_sensor:
+  - platform: ld2410
+    has_target:
+      name: Presence
+    has_moving_target:
+      name: Moving Target
+    has_still_target:
+      name: Still Target
+
+sensor:
+  - platform: ld2410
+    moving_distance:
+      name: Moving Distance
+    still_distance:
+      name: Still Distance
+    detection_distance:
+      name: Detection Distance
+
+text_sensor:
+  - platform: ld2410
+    version:
+      name: Radar Firmware Version
