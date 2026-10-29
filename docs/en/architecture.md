@@ -1,0 +1,15 @@
+[English](architecture.md) | [简体中文](../architecture.md)
+
+# Architecture and interfaces
+
+The ESP32-C3 runs ESPHome. The LD2410C supplies radar data through the hardware UART on GPIO20/21; USB Serial/JTAG provides logging and initial flashing. The main loop parses radar frames and coordinates settings and controller state. A separate serial TV RPC worker handles HTTP requests, while controller state stays under main-loop ownership to avoid blocking the UART or modifying state concurrently. Sony requests go to `/sony/system` with `X-Auth-PSK`; the device only queries power and power-saving mode and sets power-saving mode. It sends no wake or power commands.
+
+The controller separates user intent, health and responsibility for restoring a picture it turned off. Intent is stored independently in an ESPHome preference; monitoring pauses when radar or TV state expires, the TV is in standby, or parameters are unverified. Recovery responsibility exists only in RAM and is lost on restart. `Restore Picture` turns intent off and requests recovery. The single validated settings blob is stored separately from intent and Wi-Fi data in NVS namespace `tv_trial`, key `settings_v1`.
+
+## Settings and web UI
+
+`GET /settings` returns `revision`, `status`, `phase`, saved `settings`, and, during a transaction, possibly `pending` and an error. `POST /settings` uses `expected_revision` and a complete settings object (or `action: defaults`); requests are accepted only within valid ranges, while idle and at the expected revision. Reread on conflict. After `202 Accepted`, the device first handles picture recovery, then writes and reads back each radar stage. Only after all values match, data is fresh and NVS saving succeeds does it become `ready` and advance the revision. Monitoring stays paused on failure or uncertainty; HTTP 200 must not be treated as completed settings.
+
+The device serves the web CSS/JS. The UI consumes `/events` SSE using raw entity names such as `binary_sensor/Radar Data Fresh`, and derives its display from heartbeat, freshness and settings. Radar ripples indicate fresh online radar data only; they do not mean automatic monitoring is active. The near/far/no-target figures are illustrations. The top-right refresh reloads the whole page. The device exposes three PNG icon routes: `/apple-touch-icon.png`, `/apple-touch-icon-v1.png` and `/apple-touch-icon-precomposed.png`. An existing home-screen icon may be cached; remove and add it again if necessary.
+
+The production YAML configures native ESPHome OTA; web OTA, the Home Assistant native API and a captive portal are not enabled. The observer and network-observer builds do not control the TV. See [Getting started](getting-started.md) for the stages and commands. For implementation details, refer to `firmware/tv_trial_runtime.h`, `tv_trial_controller.h`, `tv_trial_settings*.h` and `firmware/ui/`.

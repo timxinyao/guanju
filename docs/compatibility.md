@@ -1,3 +1,5 @@
+[English](en/compatibility.md) | [简体中文](compatibility.md)
+
 # 兼容性与边界
 
 当前电视适配只针对 Sony BRAVIA 的 IP 控制：向电视 `/sony/system` 发送 `getPowerStatus`、`getPowerSavingMode` 和 `setPowerSavingMode`，PSK 放在 HTTP 请求头 `X-Auth-PSK`。这个 Sony API 路径已有实际运行记录，但不能因此断言所有 BRAVIA 型号或系统版本兼容；其他电视需要实现并验证新的 adapter，不是通用 HDMI 控制，也不宣称支持三星等其他品牌。

@@ -1,3 +1,5 @@
+[English](en/getting-started.md) | [简体中文](getting-started.md)
+
 # 从零安装与首次烧录
 
 本教程适用于接好 ESP32-C3 和 LD2410C 的新设备。先按[硬件说明](hardware.md)核对供电、针脚和安装方向；本文不替代现场安全判断。电视控制目前只实现 Sony BRAVIA 的特定 IP 接口，先读[兼容性](compatibility.md)。如果想让 AI 协助，请同时看 [AI 协助教程](ai-assisted-setup.md)。

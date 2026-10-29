@@ -8,4 +8,4 @@
 
 从 [secrets.example.yaml](secrets.example.yaml) 复制出本机 `secrets.yaml`，填写自己的 Wi-Fi 和 Sony 电视设置。不要提交或分享实际密钥文件、包含密钥的配置输出及构建产物。配置和首次烧录见[入门教程](../docs/getting-started.md)，接线见[硬件说明](../docs/hardware.md)，更新及恢复见[维护说明](../docs/maintenance.md)。
 
-本项目用于辅助观察距离，雷达存在盲区和误报，不能识别儿童或保证安全。网络访问与 OTA 边界见 [SECURITY.md](../SECURITY.md)。
+本项目用于辅助观察距离，雷达存在盲区和误报，不能识别儿童或保证安全。网络访问与 OTA 边界见 [安全说明](../SECURITY.zh-CN.md)。

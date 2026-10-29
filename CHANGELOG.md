@@ -1,16 +1,24 @@
-# 变更记录
+**English** | [简体中文](CHANGELOG.zh-CN.md)
 
-## 初始开源整理 · 2026-10-29
+# Changelog
 
-- 整理 ESP32-C3-Zero-M + HLK-LD2410C 的独立固件、中文网页、主屏幕图标、参数与校准流程。
-- 保留 Sony 画面控制、近距确认、持久功能选择、RAM 恢复责任和串行参数事务。
-- 增加公开配置模板、可重复无设备验证、CI、硬件采购/接线/装盒、首次 USB/后续 Wi-Fi 及 AI 协作教程。
-- 将个人网络凭据、历史实机日志、闪存备份和构建缓存留在仓库之外。
+## Unreleased
 
-### 已有验证依据
+- Name the independent radar distance assistant **Guanju (观距)**.
 
-此前在单套 ESP32-C3-Zero-M / LD2410C / Sony 电视环境中完成过 USB 写入、原生 Wi-Fi OTA、参数回读、网页与实际息屏恢复试用。新版网页的多种状态在模拟服务中做过浏览器检查。宿主机包含判定、事务与 HTTP 输入的无设备测试；这些记录不等于每种环境均已覆盖。
+- Add paired English and Chinese documentation and language-switch links; the device web interface remains in Chinese.
 
-### 本次及后续验证边界
+## Initial open-source preparation · 2026-10-29
 
-开源整理的实际检查结果以发布交接中的记录为准。尚不能保证：所有 Sony 型号、其他品牌、iOS 所有版本/主屏幕图标缓存、Windows/Linux 实机烧录、外壳尺寸适配、长期 Wi-Fi 稳定性、所有儿童身高/姿态/近距边缘、多目标和断电故障组合。外壳是装配建议与示意，未提供已试打适配保证。
+- Organize the standalone ESP32-C3-Zero-M and HLK-LD2410C firmware, Chinese web page, home-screen icon, settings, and calibration workflow.
+- Retain Sony picture control, near-distance confirmation, persistent user choice, RAM-only recovery responsibility, and serial settings transactions.
+- Add public configuration templates, repeatable device-free verification, CI, and guides for hardware procurement, wiring, enclosure installation, first USB flashing, later Wi-Fi updates, and AI-assisted setup.
+- Keep personal network credentials, historical real-device logs, flash backups, and build caches outside the repository.
+
+### Existing validation evidence
+
+Earlier work included USB flashing, native Wi-Fi OTA, settings readback, and web and actual picture-off/restoration trials on one ESP32-C3-Zero-M / LD2410C / Sony TV setup. Several states of the newer web interface were checked in a browser using a simulated service. Host-side device-free tests cover detection, transactions, and HTTP input; these records do not establish coverage of every environment.
+
+### Current and future validation limits
+
+Refer to the release handoff for the actual checks performed during open-source preparation. The following are not guaranteed: every Sony model, other brands, all iOS versions and home-screen icon caches, physical flashing on Windows or Linux, enclosure dimensions fitting every build, long-term Wi-Fi stability, all child heights and postures or near-distance edges, multiple targets, and power-loss/fault combinations. The enclosure is an assembly suggestion and illustration, with no guarantee from a tested print fit.

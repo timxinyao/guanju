@@ -1,3 +1,5 @@
+[English](en/development-ui.md) | [简体中文](development-ui.md)
+
 # 本地 UI 预览
 
 此服务仅绑定本机 `127.0.0.1`，使用内存中的模拟实体，不连接或控制电视、雷达或任何设备，不依赖 ESPHome。根页面从 `firmware/ui/app.js` 和 `firmware/ui/app.css` 提供 `/0.js` 与 `/0.css`；它们由固件 UI 的开发者维护。每次启动重新生成独立数据。

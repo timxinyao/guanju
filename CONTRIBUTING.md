@@ -1,21 +1,27 @@
-# 参与贡献
+**English** | [简体中文](CONTRIBUTING.zh-CN.md)
 
-欢迎修复问题、改善硬件复刻教程或增加电视适配。先读 [README](README.md)、[架构](docs/architecture.md)、[AI 入口](AGENTS.md) 与 [安全边界](SECURITY.md)。
+# Contributing
 
-## 开始
+Bug fixes, improvements to the hardware build guides, and new TV integrations are welcome. Start with the [README](README.md), [architecture](docs/en/architecture.md), [AI entry point](AGENTS.md) (in Chinese), and [security boundaries](SECURITY.md).
 
-1. 在自己的分支或工作树修改；不要把个人 `secrets.yaml`、构建目录、截图中的密钥或固件上传。
-2. 安装 `requirements.txt` 的固定版本，准备 Node.js 22、POSIX sh 和 C++17 编译器。Windows 全量检查建议 WSL2。
-3. 用 `python tools/verify_project.py --config` 运行无设备检查。页面变更可使用 [模拟预览](docs/development-ui.md)，不必连接真实电视。
-4. 为判定、恢复、参数事务或请求顺序的行为变化补有意义的回归断言；纯文案不要求镜像实现的测试。
-5. 更新对应用户文档，写清测试命令、结果和未验证的硬件/系统。审查需覆盖需求和失败路径，不能只看测试是否全绿。
+## Getting started
 
-## 新电视适配
+1. Work in your own branch or worktree. Do not upload your personal `secrets.yaml`, build directories, secrets in screenshots, or firmware images.
+2. Install the pinned versions in `requirements.txt`, and prepare Node.js 22, POSIX sh, and a C++17 compiler. WSL2 is recommended for the full checks on Windows.
+3. Run `python tools/verify_project.py --config` for device-free checks. For page changes, use the [simulated preview](docs/en/development-ui.md); a real TV is not required.
+4. Add meaningful regression assertions for changes to detection, recovery, settings transactions, or request ordering. Prose-only edits do not need tests that mirror the implementation.
+5. Update the relevant user documentation and report the commands, results, and any hardware or systems not tested. Reviews must cover requirements and failure paths, not just passing tests.
 
-现有运行时使用 Sony `/sony/system`。增加品牌时先明确查询、画面关闭/恢复、待机与错误语义，保留“不唤醒、只恢复本次所有权、超时先回读”的不变量。不要在没有证据时把新型号标为支持；兼容性文档应说明实测条件。
+## Adding a TV integration
 
-## Issue 与变更说明
+The existing runtime uses Sony `/sony/system`. Before adding a brand, define the semantics of status queries, picture off and restoration, standby, and errors. Preserve the invariants: never wake the TV, restore only a picture-off action owned by this controller, and read back state after a timeout. Do not claim support for a new model without evidence; document the conditions of any real-device tests in the compatibility guide.
 
-报告问题时附型号、雷达/固件版本、脱敏后的状态和复现步骤。请使用模板，不附完整配置日志、PSK、Wi-Fi 密码或个人固件。安全问题按 SECURITY 私下处理。
+## Issues and change descriptions
 
-提交信息建议 `feat:`、`fix:`、`docs:`、`test:` 或 `chore:`，描述具体结果。提交变更即表示你有权按本仓库 MIT 许可贡献这些内容；第三方内容须保留来源与许可说明。
+When reporting a problem, include the model, radar and firmware versions, sanitized state, and reproduction steps. Use the templates and do not attach complete configuration logs, a PSK, Wi-Fi passwords, or personal firmware images. Handle security issues privately as described in [SECURITY.md](SECURITY.md).
+
+Suggested commit prefixes are `feat:`, `fix:`, `docs:`, `test:`, and `chore:`; describe the concrete result. By submitting a change, you confirm that you can contribute it under the repository's MIT license. Preserve attribution and license information for third-party content.
+
+## Bilingual documentation
+
+Maintain the English and Chinese paired files together when changing user documentation, including section structure, links, commands, parameters, and security boundaries. Call out any portions that cannot be synchronized in the change description. Bilingual documentation does not mean the device web interface supports language switching.

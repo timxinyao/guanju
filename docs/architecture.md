@@ -1,3 +1,5 @@
+[English](en/architecture.md) | [简体中文](architecture.md)
+
 # 架构与接口
 
 ESP32-C3 运行 ESPHome，LD2410C 经 GPIO20/21 的硬件 UART 提供雷达数据；USB Serial/JTAG 用于日志和首次烧录。主循环解析雷达、协调参数和控制器状态。独立的串行 TV RPC worker 负责 HTTP 请求，控制器状态由主循环管理，避免阻塞串口及并发修改状态。Sony 请求发到 `/sony/system`，使用 `X-Auth-PSK`；只查询电源与省电模式、设置省电模式，不执行唤醒/电源操作。

@@ -1,3 +1,5 @@
+[English](en/ai-assisted-setup.md) | [简体中文](ai-assisted-setup.md)
+
 # 用 AI 协助搭建
 
 Codex、Claude、Cursor 等能读取本地仓库并执行 shell 命令的 agent 都可协助。先在自己的电脑打开仓库，让 agent 读取项目说明；板子接 USB，电脑与设备在同一局域网并有串口访问权限。AI 不需要装在板子上，也不需要为固件配置 OpenAI API key。网页由设备提供，控制逻辑在板上独立运行，网页不是 Codex 服务。

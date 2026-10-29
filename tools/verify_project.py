@@ -73,7 +73,7 @@ def run(command):
 
 
 def verify_config():
-    with tempfile.TemporaryDirectory(prefix='cleanyourtv-config-') as folder:
+    with tempfile.TemporaryDirectory(prefix='guanju-config-') as folder:
         target = Path(folder) / 'firmware'
         shutil.copytree(ROOT / 'firmware', target, ignore=shutil.ignore_patterns(
             'secrets*', '.esphome', 'build', '__pycache__'))
@@ -97,7 +97,7 @@ def main():
             run(['node', str(test.relative_to(ROOT))])
         run(['node', '--check', 'firmware/ui/app.js'])
         run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_verify_project.py'])
-        with tempfile.TemporaryDirectory(prefix='cleanyourtv-icon-') as folder:
+        with tempfile.TemporaryDirectory(prefix='guanju-icon-') as folder:
             generated = Path(folder) / 'icon.h'
             run([sys.executable, 'tools/embed_app_icon.py', 'firmware/ui/apple-touch-icon.png', str(generated)])
             if generated.read_bytes() != (ROOT / 'firmware/tv_trial_app_icon_data.h').read_bytes():

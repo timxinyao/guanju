@@ -1,3 +1,5 @@
+[English](en/hardware.md) | [简体中文](hardware.md)
+
 # 硬件采购与接线
 
 这份清单对应本项目的 **海凌科 HLK-LD2410C + 微雪 ESP32-C3-Zero-M**。装好后按 [首次安装](getting-started.md) 写入固件，再按 [使用与校准](usage.md) 验证；外壳和摆放见 [装盒与安装](enclosure.md)。

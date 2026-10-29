@@ -1,3 +1,5 @@
+[English](en/maintenance.md) | [简体中文](maintenance.md)
+
 # 更新、恢复与维护
 
 固件和网页只用于可信局域网。正式版的 ESPHome 原生 OTA 在 ESP32 默认使用 TCP 3232，仓库默认未设置 OTA 密码；网页本身没有固件上传功能。限制网络访问，不要向互联网开放。`radar-observer.yaml` 和 `radar-network-observer.yaml` 没有配置原生 OTA，应通过 USB 更新。所有密钥、本地构建目录及固件二进制都可能包含 Wi-Fi/电视 PSK，不要分享或提交。
