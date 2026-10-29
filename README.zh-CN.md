@@ -57,6 +57,13 @@
 
 ## 从零做到能用
 
+从 GitHub 克隆项目：
+
+```sh
+git clone https://github.com/timxinyao/guanju.git
+cd guanju
+```
+
 1. [确认电视接口](docs/compatibility.md)，准备硬件并按图断电接线。
 2. [准备电脑环境](docs/getting-started.md)：Python 3.12–3.14，推荐 3.13，安装固定版本 ESPHome。
 3. 复制 `firmware/secrets.example.yaml` 为本机 `firmware/secrets.yaml`，填写自己的 **2.4GHz Wi-Fi**、备用热点密码、电视地址和 PSK。此文件不进入 Git，也不要贴进 AI 聊天或 Issue。
@@ -94,7 +101,7 @@
 | 在电脑上预览网页 | [本地 UI 预览](docs/development-ui.md) |
 | 贡献代码 | [贡献指南](CONTRIBUTING.zh-CN.md) |
 | 作为 AI 接手项目 | [AGENTS.md](AGENTS.md) |
-| 接手创建 GitHub 仓库与首次推送 | [发布交接](docs/publishing.md) |
+| 维护 GitHub 仓库 | [发布与维护](docs/publishing.md) |
 
 ## 开发验证
 
@@ -106,7 +113,7 @@ python -m pip install -r requirements.txt
 python tools/verify_project.py --config
 ```
 
-验证还需要 Node.js 22、POSIX `sh` 和支持 C++17/ASan/UBSan 的编译器；Windows 全量开发检查建议用 WSL2，首次 USB 烧录可按教程在 Windows 原生环境操作。命令在本机运行，不接触电视或刷写设备；`--config` 在临时副本中使用示例密钥，不覆盖你的私有配置。CI 采用相同检查；当前线上 CI 状态需在仓库发布后确认。
+验证还需要 Node.js 22、POSIX `sh` 和支持 C++17/ASan/UBSan 的编译器；Windows 全量开发检查建议用 WSL2，首次 USB 烧录可按教程在 Windows 原生环境操作。命令在本机运行，不接触电视或刷写设备；`--config` 在临时副本中使用示例密钥，不覆盖你的私有配置。CI 采用相同检查；具体结果以 GitHub Actions 实际运行记录为准。
 
 ## 网络、许可与项目状态
 
