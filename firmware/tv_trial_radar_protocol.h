@@ -26,6 +26,8 @@ struct RadarParameters {
 };
 class RadarFrames {
  public:
+  // Provisional distance margin, not an accuracy or medical claim.
+  static constexpr uint16_t RELEASE_MARGIN_CM = 20;
   RadarEvent feed(uint8_t byte) {
     if (size_ == buffer_.size()) discard_();
     buffer_[size_++] = byte;
@@ -54,13 +56,21 @@ class RadarFrames {
         const bool still = state == 2 || state == 3;
         const uint16_t moving_cm = static_cast<uint16_t>(buffer_[9] | (buffer_[10] << 8));
         const uint16_t still_cm = static_cast<uint16_t>(buffer_[12] | (buffer_[13] << 8));
-        present_ = (moving && moving_cm >= 1 && moving_cm <= near_distance_cm_) ||
-                   (still && still_cm >= 1 && still_cm <= near_distance_cm_);
+        moving_distance_cm_ = moving ? moving_cm : 0;
+        still_distance_cm_ = still ? still_cm : 0;
+        const uint32_t threshold = static_cast<uint32_t>(near_distance_cm_) +
+          (near_latched_ ? RELEASE_MARGIN_CM : 0);
+        present_ = (moving && moving_cm >= 1 && moving_cm <= threshold) ||
+                   (still && still_cm >= 1 && still_cm <= threshold);
         // Zero is conservatively treated as an unknown measurement, not an
         // assertion of absence. One usable near target is sufficient even if
         // the other category is unknown. Unsupported/noise states stay unknown.
         measurement_known_ = state <= 3 && (state == 0 || present_ ||
           ((!moving || moving_cm > 0) && (!still || still_cm > 0)));
+        // Keep the spatial latch through unknown measurements, but never
+        // publish unknown as a usable near/clear sample. A valid absent frame
+        // or all valid targets beyond the release boundary clears the latch.
+        if (measurement_known_) near_latched_ = present_;
         scene_ = !measurement_known_ ? ScenePresence::Unknown :
           (present_ ? ScenePresence::Near : (state==0 ? ScenePresence::Absent : ScenePresence::Far));
         event = RadarEvent::Periodic;
@@ -95,12 +105,19 @@ class RadarFrames {
     return RadarEvent::None;
   }
   bool present() const { return present_; }
+  // Category validity is local to the last parsed frame. The runtime must
+  // additionally gate diagnostics with UART sample freshness.
+  bool moving_valid() const { return moving_distance_cm_ != 0; }
+  bool still_valid() const { return still_distance_cm_ != 0; }
+  uint16_t moving_distance_cm() const { return moving_distance_cm_; }
+  uint16_t still_distance_cm() const { return still_distance_cm_; }
   ScenePresence scene(bool available = true) const {
     return available ? scene_ : ScenePresence::Unavailable;
   }
   void set_near_distance(uint16_t distance_cm) {
     near_distance_cm_=distance_cm;
-    present_=false; measurement_known_=false;
+    present_=false; near_latched_=false; measurement_known_=false;
+    moving_distance_cm_=0; still_distance_cm_=0;
     scene_=ScenePresence::Unknown;
   }
   bool measurement_known() const { return measurement_known_; }
@@ -119,12 +136,13 @@ class RadarFrames {
   RadarParameters parameters_{};
   std::array<uint8_t,64> buffer_{};
   size_t size_{0};
-  bool present_{false};
+  bool present_{false}, near_latched_{false};
   bool measurement_known_{false};
   ScenePresence scene_{ScenePresence::Unknown};
   uint8_t ack_command_{0};
   bool ack_success_{false};
   uint16_t near_distance_cm_{150};
+  uint16_t moving_distance_cm_{0}, still_distance_cm_{0};
   uint8_t resolution_{0xFF};
 };
 }  // namespace tv_trial

@@ -27,6 +27,11 @@ struct Rig {
   Request poll(uint32_t time, bool present, bool measurement_known = true) {
     now = time;
     c.radar_frame(now, present, measurement_known);
+    return service(now);
+  }
+
+  Request service(uint32_t time) {
+    now = time;
     auto request = c.next(now);
     if (request.kind == RpcKind::Query) {
       c.complete_query(request.token, now, power, mode, now);
@@ -535,14 +540,23 @@ void resolution_requires_valid_ack() {
   CHECK(parser.resolution() == 0);
 }
 
-void near_distance_includes_150_but_excludes_151_cm() {
+void near_distance_enters_at_150_and_releases_beyond_170_cm() {
   RadarFrames parser;
   CHECK(feed(parser, target_frame(1, 150, 0)) == RadarEvent::Periodic);
   CHECK(parser.present());
   CHECK(parser.measurement_known());
-  CHECK(feed(parser, target_frame(1, 151, 0)) == RadarEvent::Periodic);
+  for (uint16_t cm : {151, 170}) {
+    CHECK(feed(parser, target_frame(1, cm, 0)) == RadarEvent::Periodic);
+    CHECK(parser.present());
+    CHECK(parser.measurement_known());
+  }
+  CHECK(feed(parser, target_frame(1, 171, 0)) == RadarEvent::Periodic);
   CHECK(!parser.present());
   CHECK(parser.measurement_known());
+  CHECK(feed(parser, target_frame(1, 170, 0)) == RadarEvent::Periodic);
+  CHECK(!parser.present());
+  CHECK(feed(parser, target_frame(1, 150, 0)) == RadarEvent::Periodic);
+  CHECK(parser.present());
 }
 
 void absent_state_ignores_residual_near_distances() {
@@ -564,7 +578,7 @@ void static_near_target_is_accepted_without_motion() {
   CHECK(feed(parser, target_frame(2, 400, 150)) == RadarEvent::Periodic);
   CHECK(parser.present());
   CHECK(parser.measurement_known());
-  CHECK(feed(parser, target_frame(2, 100, 151)) == RadarEvent::Periodic);
+  CHECK(feed(parser, target_frame(2, 100, 171)) == RadarEvent::Periodic);
   CHECK(!parser.present());
   CHECK(parser.measurement_known());
 }
@@ -749,6 +763,360 @@ void radar_scene_distinguishes_real_near_far_absent_unknown_and_stale() {
   CHECK(p.scene(false)==ScenePresence::Unavailable);
 }
 
+void unknown_frames_do_not_turn_a_latched_boundary_into_clear() {
+  RadarFrames p;
+  CHECK(feed(p,target_frame(2,0,150))==RadarEvent::Periodic);
+  CHECK(p.present());
+  for (uint8_t state : {2, 5}) {
+    CHECK(feed(p,target_frame(state,0,0))==RadarEvent::Periodic);
+    CHECK(!p.measurement_known());
+    CHECK(!p.present());
+    CHECK(p.scene()==ScenePresence::Unknown);
+    CHECK(feed(p,target_frame(2,0,165))==RadarEvent::Periodic);
+    CHECK(p.measurement_known());
+    CHECK(p.present());
+  }
+  CHECK(feed(p,target_frame(0,80,80))==RadarEvent::Periodic);
+  CHECK(p.scene()==ScenePresence::Absent);
+  CHECK(feed(p,target_frame(2,0,165))==RadarEvent::Periodic);
+  CHECK(p.scene()==ScenePresence::Far);
+}
+
+void changing_distance_resets_previous_hysteresis_latch() {
+  RadarFrames p;
+  CHECK(feed(p,target_frame(1,150,0))==RadarEvent::Periodic);
+  CHECK(p.present());
+  p.set_near_distance(150);
+  CHECK(!p.measurement_known());
+  CHECK(feed(p,target_frame(1,160,0))==RadarEvent::Periodic);
+  CHECK(!p.present());
+}
+
+void one_near_frame_cannot_complete_a_one_second_confirmation() {
+  Rig r;
+  CHECK(r.c.configure_timing(1000,1000,100));
+  r.arm();
+  CHECK(r.service(1100).kind==RpcKind::None);
+  CHECK(!r.c.owns_picture());
+  CHECK(r.poll(1101,true).kind==RpcKind::Hide);
+}
+
+void early_burst_cannot_complete_confirmation_without_end_sample() {
+  Rig r;
+  CHECK(r.c.configure_timing(1000,1000,100));
+  r.arm();
+  for(uint32_t t=101;t<=110;++t) CHECK(r.poll(t,true).kind==RpcKind::None);
+  CHECK(r.service(1100).kind==RpcKind::None);
+  CHECK(r.poll(1101,true).kind==RpcKind::Hide);
+}
+
+void a_completed_interval_needs_a_recent_supporting_frame() {
+  Rig r;
+  r.arm();
+  CHECK(r.poll(1100,true).kind==RpcKind::None);
+  CHECK(r.poll(2100,true).kind==RpcKind::None);
+  r.c.radar_frame(3100,true);
+  // Still globally fresh (2.5 s), but not recent enough to command (>1 s).
+  CHECK(r.service(4101).kind==RpcKind::None);
+  CHECK(r.c.radar_fresh(4101));
+  CHECK(r.poll(4102,true).kind==RpcKind::Hide);
+}
+
+void one_clear_frame_cannot_complete_automatic_restore() {
+  Rig r;
+  r.hidden();
+  CHECK(r.poll(4000,false).kind==RpcKind::None);
+  CHECK(r.service(5000).kind==RpcKind::None);
+  CHECK(r.c.owns_picture());
+  CHECK(r.poll(5001,false).kind==RpcKind::Restore);
+}
+
+void external_picture_restore_waits_for_a_complete_clear_interval() {
+  Rig r;
+  r.hidden();
+  r.mode=Mode::Normal;
+  CHECK(r.poll(4600,true).kind==RpcKind::None);
+  CHECK(!r.c.owns_picture());
+  CHECK(r.c.enabled());
+  for(uint32_t t=5600;t<=10600;t+=1000) CHECK(r.poll(t,true).kind==RpcKind::None);
+  CHECK(!r.c.effective(r.now));
+  CHECK(std::string(r.c.status())=="ON; paused: external picture change; waiting for clear zone");
+  CHECK(r.poll(11000,false).kind==RpcKind::None);
+  CHECK(r.poll(11999,false).kind==RpcKind::None);
+  CHECK(!r.c.effective(11999));
+  CHECK(r.poll(12000,false).kind==RpcKind::None);
+  CHECK(r.c.effective(12000));
+  CHECK(r.poll(12100,true).kind==RpcKind::None);
+  CHECK(r.poll(13100,true).kind==RpcKind::None);
+  CHECK(r.poll(14100,true).kind==RpcKind::None);
+  CHECK(r.poll(15100,true).kind==RpcKind::Hide);
+}
+
+void unknown_or_missing_clear_samples_do_not_cancel_external_override() {
+  Rig r;
+  r.hidden();
+  r.mode=Mode::Normal;
+  CHECK(r.poll(4600,true).kind==RpcKind::None);
+  CHECK(r.poll(5000,false).kind==RpcKind::None);
+  CHECK(r.poll(5500,false,false).kind==RpcKind::None);
+  CHECK(r.poll(6000,false).kind==RpcKind::None);
+  CHECK(r.poll(6500,false).kind==RpcKind::None);
+  CHECK(!r.c.effective(6500));
+  CHECK(r.service(7000).kind==RpcKind::None);  // No supporting end frame.
+  CHECK(!r.c.effective(7000));
+  CHECK(r.poll(7001,false).kind==RpcKind::None);
+  CHECK(r.c.effective(7001));
+}
+
+void snooze_restores_owned_picture_without_changing_enabled_intent() {
+  Rig r;
+  r.hidden();
+  CHECK(r.c.snooze(600000,r.now));
+  CHECK(r.c.enabled());
+  CHECK(r.c.snoozed(r.now));
+  CHECK(!r.c.effective(r.now));
+  CHECK(r.c.snooze_remaining_ms(r.now)==600000);
+  auto request=r.c.next(r.now);
+  CHECK(request.kind==RpcKind::Restore);
+  r.c.complete_command(request.token,r.now,Outcome::Success);
+  r.mode=Mode::Normal;
+  CHECK(r.poll(4100,true).kind==RpcKind::None);
+  CHECK(!r.c.owns_picture());
+  CHECK(r.c.enabled());
+  CHECK(std::string(r.c.status())=="ON; paused: snoozed");
+  for(uint32_t t=5100;t<=10100;t+=1000) CHECK(r.poll(t,true).kind==RpcKind::None);
+}
+
+void snooze_expiry_requires_a_new_health_gated_confirmation() {
+  for(uint32_t duration : {600000U,1800000U}) {
+    Rig r;
+    r.arm();
+    CHECK(r.c.snooze(duration,100));
+    CHECK(r.poll(duration-900,true).kind==RpcKind::None);
+    CHECK(r.poll(duration+99,true).kind==RpcKind::None);
+    CHECK(r.c.snooze_remaining_ms(duration+99)==1);
+    CHECK(r.poll(duration+100,true).kind==RpcKind::None);
+    CHECK(!r.c.snoozed(duration+100));
+    CHECK(r.c.snooze_remaining_ms(duration+100)==0);
+    CHECK(r.c.enabled());
+    CHECK(r.poll(duration+1100,true).kind==RpcKind::None);
+    CHECK(r.poll(duration+2100,true).kind==RpcKind::None);
+    CHECK(r.poll(duration+3100,true).kind==RpcKind::Hide);
+  }
+}
+
+void resume_does_not_credit_snoozed_time_or_enable_an_off_controller() {
+  Rig r;
+  r.arm();
+  CHECK(r.c.snooze(1800000,100));
+  CHECK(r.poll(1100,true).kind==RpcKind::None);
+  r.c.resume(1100);
+  CHECK(!r.c.snoozed(1100));
+  CHECK(r.c.enabled());
+  CHECK(r.poll(2100,true).kind==RpcKind::None);
+  CHECK(r.poll(3100,true).kind==RpcKind::None);
+  CHECK(r.poll(4100,true).kind==RpcKind::Hide);
+  Rig off;
+  CHECK(!off.c.snooze(600000,100));
+  off.c.resume(100);
+  CHECK(!off.c.enabled());
+  CHECK(!off.c.snoozed(100));
+}
+
+void snooze_does_not_restore_unowned_picture_or_wake_standby() {
+  Rig r;
+  r.mode=Mode::PictureOff;
+  CHECK(r.poll(1100,true).kind==RpcKind::None);
+  r.arm();
+  CHECK(r.c.snooze(600000,1100));
+  CHECK(r.service(1100).kind==RpcKind::None);
+  CHECK(!r.c.owns_picture());
+  r.power=Power::Standby;
+  CHECK(r.poll(2100,true).kind==RpcKind::None);
+  CHECK(r.poll(601100,true).kind==RpcKind::None);
+  CHECK(r.c.enabled());
+  CHECK(!r.c.effective(601100));
+}
+
+void snooze_during_an_inflight_hide_waits_then_recovers() {
+  Rig r;
+  auto request=r.hide();
+  CHECK(r.c.snooze(600000,3150));
+  CHECK(r.c.next(3150).kind==RpcKind::None);
+  r.c.complete_command(request.token,3200,Outcome::Success);
+  r.mode=Mode::PictureOff;
+  CHECK(r.poll(3700,true).kind==RpcKind::Restore);
+  CHECK(r.c.enabled());
+  CHECK(r.c.snoozed(3700));
+}
+
+void snooze_rejects_other_durations_and_manual_off_cancels_it() {
+  Rig r;
+  r.arm();
+  for(uint32_t duration : {0U,1U,599999U,600001U,1800001U,0xFFFFFFFFU})
+    CHECK(!r.c.snooze(duration,100));
+  CHECK(r.c.effective(100));
+  CHECK(!r.c.snoozed(100));
+  CHECK(r.c.snooze(600000,100));
+  r.c.set_enabled(false,1100);
+  CHECK(!r.c.enabled());
+  CHECK(!r.c.snoozed(1100));
+  CHECK(r.c.snooze_remaining_ms(1100)==0);
+  CHECK(r.poll(600100,true).kind==RpcKind::None);
+  CHECK(!r.c.enabled());
+}
+
+void snooze_timing_and_supporting_frames_survive_millis_wrap() {
+  Rig r;
+  const uint32_t start=0xFFFF0000U;
+  CHECK(r.poll(start,true).kind==RpcKind::None);
+  r.arm();
+  CHECK(r.c.snooze(600000,start));
+  const uint32_t end=start+600000U;
+  CHECK(r.poll(end-1,true).kind==RpcKind::None);
+  CHECK(r.c.snooze_remaining_ms(end-1)==1);
+  CHECK(r.poll(end,true).kind==RpcKind::None);
+  CHECK(!r.c.snoozed(end));
+  CHECK(r.poll(end+1000,true).kind==RpcKind::None);
+  CHECK(r.poll(end+2000,true).kind==RpcKind::None);
+  CHECK(r.poll(end+3000,true).kind==RpcKind::Hide);
+}
+
+void resume_preserves_external_override_until_clear() {
+  Rig r;
+  r.hidden();
+  r.mode=Mode::Normal;
+  CHECK(r.poll(4600,true).kind==RpcKind::None);
+  CHECK(r.c.external_override());
+  CHECK(r.c.snooze(600000,4600));
+  r.c.resume(4600);
+  CHECK(r.c.external_override());
+  for(uint32_t t=5600;t<=9600;t+=1000) CHECK(r.poll(t,true).kind==RpcKind::None);
+}
+
+void diagnostic_distances_use_only_valid_target_categories() {
+  RadarFrames p;
+  struct Case { uint8_t state; uint16_t moving,still,want_moving,want_still; };
+  const Case cases[]{
+    {0,80,90,0,0}, {1,100,80,100,0}, {2,100,150,0,150},
+    {3,100,0,100,0}, {3,0,250,0,250}, {5,80,80,0,0}
+  };
+  for(const auto &c:cases) {
+    CHECK(feed(p,target_frame(c.state,c.moving,c.still))==RadarEvent::Periodic);
+    CHECK(p.moving_valid()==(c.want_moving!=0));
+    CHECK(p.still_valid()==(c.want_still!=0));
+    CHECK(p.moving_distance_cm()==c.want_moving);
+    CHECK(p.still_distance_cm()==c.want_still);
+  }
+  CHECK(feed(p,target_frame(3,100,150))==RadarEvent::Periodic);
+  p.set_near_distance(300);
+  CHECK(!p.moving_valid());
+  CHECK(!p.still_valid());
+  CHECK(p.moving_distance_cm()==0);
+  CHECK(p.still_distance_cm()==0);
+}
+
+void batched_unknown_frames_cannot_start_an_external_clear_interval() {
+  Rig r;
+  r.hidden();
+  r.mode=Mode::Normal;
+  CHECK(r.poll(4600,true).kind==RpcKind::None);
+  // UART can deliver multiple frames before next() runs once.
+  r.c.radar_frame(5000,false,false);
+  r.c.radar_frame(6000,false,true);
+  CHECK(r.service(6000).kind==RpcKind::None);
+  CHECK(r.c.external_override());
+  CHECK(!r.c.effective(6000));
+  CHECK(r.poll(7000,false).kind==RpcKind::None);
+  CHECK(!r.c.external_override());
+}
+
+void external_visible_picture_wins_over_undispatched_fault_recovery() {
+  Rig r;
+  r.hidden();
+  r.mode=Mode::High;  // The remote control restores a different saving mode.
+  CHECK(r.poll(4600,false,false).kind==RpcKind::None);
+  CHECK(!r.c.owns_picture());
+  CHECK(r.c.external_override());
+  CHECK(r.c.enabled());
+  CHECK(r.c.mode()==Mode::High);
+  for(uint32_t t=5100;t<=10100;t+=1000) CHECK(r.poll(t,true).kind==RpcKind::None);
+  CHECK(r.c.external_override());
+  CHECK(r.poll(11000,false).kind==RpcKind::None);
+  CHECK(r.poll(12000,false).kind==RpcKind::None);
+  CHECK(!r.c.external_override());
+  CHECK(r.poll(13000,true).kind==RpcKind::None);
+  CHECK(r.poll(14000,true).kind==RpcKind::None);
+  CHECK(r.poll(15000,true).kind==RpcKind::None);
+  auto request=r.poll(16000,true);
+  CHECK(request.kind==RpcKind::Hide);
+  r.c.complete_command(request.token,16000,Outcome::Success);
+  r.mode=Mode::PictureOff;
+  CHECK(r.poll(16500,true).kind==RpcKind::None);
+  r.c.set_enabled(false,16500);
+  request=r.c.next(16500);
+  CHECK(request.kind==RpcKind::Restore);
+  CHECK(request.mode==Mode::High);
+}
+
+void early_readback_of_dispatched_restore_is_not_an_external_override() {
+  Rig r;
+  r.hidden();
+  CHECK(r.poll(4000,false).kind==RpcKind::None);
+  auto request=r.poll(5000,false);
+  CHECK(request.kind==RpcKind::Restore);
+  r.c.complete_command(request.token,5000,Outcome::Success);
+  r.mode=Mode::Normal;
+  // An explicit request can force a query before the verification delay.
+  r.c.request_restore(5001);
+  CHECK(r.service(5100).kind==RpcKind::None);
+  CHECK(r.c.owns_picture());
+  CHECK(!r.c.external_override());
+  CHECK(r.poll(5500,false).kind==RpcKind::None);
+  CHECK(!r.c.owns_picture());
+  CHECK(!r.c.external_override());
+}
+
+void restore_readback_in_a_different_visible_mode_requires_external_courtesy() {
+  struct Case { Mode requested, observed; bool external; };
+  const Case cases[]{
+    {Mode::Normal,Mode::High,true}, {Mode::Normal,Mode::Low,true},
+    {Mode::Low,Mode::Normal,true}, {Mode::High,Mode::Low,true},
+    {Mode::Normal,Mode::Normal,false}, {Mode::Low,Mode::Low,false},
+    {Mode::High,Mode::High,false}
+  };
+  for(const auto &c:cases) {
+    Rig r;
+    r.mode=c.requested;
+    CHECK(r.poll(1100,true).kind==RpcKind::None);
+    r.arm();
+    CHECK(r.poll(2100,true).kind==RpcKind::None);
+    CHECK(r.poll(3100,true).kind==RpcKind::None);
+    auto request=r.poll(4100,true);
+    CHECK(request.kind==RpcKind::Hide);
+    r.c.complete_command(request.token,4100,Outcome::Success);
+    r.mode=Mode::PictureOff;
+    CHECK(r.poll(4600,true).kind==RpcKind::None);
+    request=r.poll(5000,false,false);
+    CHECK(request.kind==RpcKind::Restore);
+    CHECK(request.mode==c.requested);
+    r.c.complete_command(request.token,5000,Outcome::Success);
+    r.mode=c.observed;
+    CHECK(r.poll(5500,true).kind==RpcKind::None);
+    CHECK(!r.c.owns_picture());
+    CHECK(r.c.external_override()==c.external);
+    CHECK(r.c.mode()==c.observed);
+    CHECK(r.poll(6500,true).kind==RpcKind::None);
+    CHECK(r.poll(7500,true).kind==RpcKind::None);
+    CHECK(r.poll(8500,true).kind==(c.external ? RpcKind::None : RpcKind::Hide));
+    if(c.external) {
+      CHECK(r.poll(9000,false).kind==RpcKind::None);
+      CHECK(r.poll(10000,false).kind==RpcKind::None);
+      CHECK(!r.c.external_override());
+    }
+  }
+}
+
 int main() {
   int failures = 0;
   int count = 0;
@@ -758,6 +1126,25 @@ int main() {
     catch (const std::exception &e) { ++failures; std::cerr << "FAIL " << e.what() << '\n'; }
   };
 #define RUN(name) run(#name, name)
+  RUN(restore_readback_in_a_different_visible_mode_requires_external_courtesy);
+  RUN(external_visible_picture_wins_over_undispatched_fault_recovery);
+  RUN(early_readback_of_dispatched_restore_is_not_an_external_override);
+  RUN(batched_unknown_frames_cannot_start_an_external_clear_interval);
+  RUN(diagnostic_distances_use_only_valid_target_categories);
+  RUN(snooze_restores_owned_picture_without_changing_enabled_intent);
+  RUN(snooze_expiry_requires_a_new_health_gated_confirmation);
+  RUN(resume_does_not_credit_snoozed_time_or_enable_an_off_controller);
+  RUN(snooze_does_not_restore_unowned_picture_or_wake_standby);
+  RUN(snooze_during_an_inflight_hide_waits_then_recovers);
+  RUN(snooze_rejects_other_durations_and_manual_off_cancels_it);
+  RUN(snooze_timing_and_supporting_frames_survive_millis_wrap);
+  RUN(resume_preserves_external_override_until_clear);
+  RUN(external_picture_restore_waits_for_a_complete_clear_interval);
+  RUN(unknown_or_missing_clear_samples_do_not_cancel_external_override);
+  RUN(one_near_frame_cannot_complete_a_one_second_confirmation);
+  RUN(early_burst_cannot_complete_confirmation_without_end_sample);
+  RUN(a_completed_interval_needs_a_recent_supporting_frame);
+  RUN(one_clear_frame_cannot_complete_automatic_restore);
   RUN(default_off_and_three_second_near_debounce);
   RUN(short_near_pulse_does_not_hide);
   RUN(one_second_away_debounce_resets_on_presence);
@@ -787,11 +1174,13 @@ int main() {
   RUN(tv_failure_recovers_intent_but_restarts_confirmation);
   RUN(old_query_from_previous_connection_cannot_resume_monitoring);
   RUN(successful_fault_recovery_resumes_on_with_new_confirmation);
+  RUN(unknown_frames_do_not_turn_a_latched_boundary_into_clear);
+  RUN(changing_distance_resets_previous_hysteresis_latch);
   RUN(identical_periodic_frames_provide_heartbeat);
   RUN(invalid_periodic_frame_is_not_presence_or_heartbeat);
   RUN(parameter_ack_preserves_zero_thresholds_and_timeout);
   RUN(resolution_requires_valid_ack);
-  RUN(near_distance_includes_150_but_excludes_151_cm);
+  RUN(near_distance_enters_at_150_and_releases_beyond_170_cm);
   RUN(absent_state_ignores_residual_near_distances);
   RUN(distant_moving_target_does_not_use_still_residue);
   RUN(static_near_target_is_accepted_without_motion);

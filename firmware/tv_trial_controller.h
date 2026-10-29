@@ -12,6 +12,8 @@ class Controller {
   static constexpr uint32_t NEAR_MS = 3000;
   static constexpr uint32_t AWAY_MS = 1000;
   static constexpr uint32_t RADAR_FRESH_MS = 2500;
+  // Allows normal 1 Hz consumers, while global heartbeat health remains 2.5 s.
+  static constexpr uint32_t SUPPORT_FRESH_MS = 1000;
   static constexpr uint32_t TV_FRESH_MS = 5000;
   static constexpr uint32_t SNAPSHOT_MAX_AGE_MS = 2000;
   static constexpr uint32_t POLL_MS = 1000;
@@ -40,7 +42,7 @@ class Controller {
       interval_valid_ = false;
     }
     if (!measurement_known) pause_("ON; paused: radar measurement unknown");
-    if (!interval_valid_ || !radar_seen_ || present != present_) {
+    if (measurement_known && (!interval_valid_ || !radar_seen_ || present != present_)) {
       interval_at_ = now;
       interval_valid_ = true;
     }
@@ -59,9 +61,34 @@ class Controller {
     // setup; lack of current health must never overwrite the saved choice.
     enabled_ = enable;
     if (!enable) {
+      snooze_active_ = false;
       if (owned_) restore_pending_ = true;
     }
     tick_(now);
+  }
+
+  bool snooze(uint32_t duration_ms, uint32_t now) {
+    if (!enabled_ || (duration_ms != 600000 && duration_ms != 1800000)) return false;
+    snooze_active_ = true;
+    snooze_at_ = now;
+    snooze_duration_ms_ = duration_ms;
+    pause_("ON; paused: snoozed");
+    tick_(now);
+    return true;
+  }
+
+  void resume(uint32_t now) {
+    snooze_active_ = false;
+    monitoring_ = false;
+    interval_valid_ = false;
+    tick_(now);
+  }
+
+  bool snoozed(uint32_t now) const {
+    return snooze_active_ && elapsed_(now, snooze_at_) < snooze_duration_ms_;
+  }
+  uint32_t snooze_remaining_ms(uint32_t now) const {
+    return snoozed(now) ? snooze_duration_ms_ - elapsed_(now, snooze_at_) : 0;
   }
 
   void request_restore(uint32_t now) {
@@ -95,15 +122,13 @@ class Controller {
     }
     if (verify_ != RpcKind::None) return {};
     if (owned_) {
-      if (effective(now) && interval_valid_ && !present_ &&
-          elapsed_(now, interval_at_) >= away_ms_) {
+      if (effective(now) && !present_ && interval_supported_(now, away_ms_)) {
         restore_pending_ = true;
         return start_(RpcKind::Restore, now, restore_mode_);
       }
       return {};
     }
-    if (effective(now) && interval_valid_ && present_ &&
-        elapsed_(now, interval_at_) >= near_ms_ && visible_(mode_)) {
+    if (effective(now) && present_ && interval_supported_(now, near_ms_) && visible_(mode_)) {
       // Acquire potential ownership BEFORE dispatch. An HTTP timeout can mean
       // pictureOff was executed; that responsibility survives the failure.
       owned_ = true;
@@ -138,6 +163,9 @@ class Controller {
     if (verify_ != RpcKind::None && elapsed_(now, command_at_) >= VERIFY_MS)
       verification_queried_ = true;
     if (verify_ == RpcKind::Restore && verification_queried_ && visible_(mode)) {
+      // A different visible saving mode is an observable external change,
+      // not confirmation that our requested mode won the race.
+      if (mode != requested_restore_mode_) external_override_ = true;
       clear_ownership_(now);
       reason_ = enabled_ ? "Picture restored; Trial ON" : "Picture restored; Trial OFF";
     } else if (owned_ && verify_ == RpcKind::Hide && verification_queried_) {
@@ -150,9 +178,12 @@ class Controller {
         // Retain potential ownership and send an idempotent compensating restore.
         pause_("ON; hide not confirmed; recovery pending");
       }
-    } else if (confirmed_owned_ && visible_(mode) && !restore_pending_) {
+    } else if (confirmed_owned_ && visible_(mode) && verify_ != RpcKind::Restore) {
+      // A fault may have queued recovery, but no restore setter has run yet.
+      // Respect an already visible external mode instead of overwriting it.
+      // Actual dispatched Restore commands remain on the verification path.
       clear_ownership_(now);
-      reason_ = "Picture changed externally; confirming near zone again";
+      external_override_ = true;
     }
     tick_(now);
   }
@@ -185,6 +216,7 @@ class Controller {
     if (!enabled_ && owned_) restore_pending_ = true;
   }
 
+  bool external_override() const { return external_override_; }
   bool enabled() const { return enabled_; }  // Persisted user intent, not health.
   bool configure_timing(uint32_t near_ms, uint32_t clear_ms, uint32_t now) {
     if (near_ms<1000 || near_ms>5000 || near_ms%1000!=0 || (clear_ms!=1000 && clear_ms!=2000)) return false;
@@ -222,6 +254,17 @@ class Controller {
   bool healthy_(uint32_t now) const {
     return link_ && radar_fresh(now) && radar_measurement_known_ && tv_fresh(now);
   }
+  bool interval_supported_(uint32_t now, uint32_t duration) const {
+    const uint32_t interval_age = elapsed_(now, interval_at_);
+    const uint32_t sample_age = elapsed_(now, radar_at_);
+    // Wall time or an early burst alone cannot complete confirmation. Require
+    // a known frame at/after the interval's end, and recent at dispatch. This
+    // subtraction form also handles millis() wrap and intervals restarted
+    // after the last received frame without treating that old frame as new.
+    return interval_valid_ && radar_measurement_known_ &&
+      interval_age >= duration && sample_age <= SUPPORT_FRESH_MS &&
+      sample_age <= interval_age - duration;
+  }
   bool matches_(uint32_t token, RpcKind kind) const {
     return in_flight_.kind == kind && in_flight_.token == token;
   }
@@ -232,6 +275,11 @@ class Controller {
     if (owned_ || manual_restore_) restore_pending_ = true;
   }
   void tick_(uint32_t now) {
+    if (snooze_active_ && !snoozed(now)) {
+      snooze_active_ = false;
+      monitoring_ = false;
+      interval_valid_ = false;
+    }
     if (enabled_) {
       if (!radar_fresh(now)) pause_("ON; paused: radar unavailable");
       else if (!radar_measurement_known_) pause_("ON; paused: radar measurement unknown");
@@ -241,8 +289,13 @@ class Controller {
     }
     const bool stalled = in_flight_.kind != RpcKind::None && elapsed_(now, request_at_) > 6000;
     if (stalled) pause_("ON; RPC stalled; waiting without parallel request");
+    if (external_override_ && healthy_(now) && power_ == Power::Active &&
+        !present_ && interval_supported_(now, away_ms_)) {
+      external_override_ = false;
+    }
     const bool can_monitor = enabled_ && healthy_(now) && power_ == Power::Active &&
-      verify_ == RpcKind::None && !restore_pending_ && !manual_restore_ && !stalled;
+      verify_ == RpcKind::None && !restore_pending_ && !manual_restore_ && !stalled &&
+      !external_override_ && !snoozed(now);
     if (can_monitor && !monitoring_) {
       // Standby, unknown data and recovery never count toward the next 3 s.
       interval_at_ = now;
@@ -251,15 +304,19 @@ class Controller {
     monitoring_ = can_monitor;
     if (!enabled_) reason_ = (owned_ || manual_restore_) ? "OFF; picture recovery pending" : "Trial OFF";
     else if (can_monitor) reason_ = owned_ ? "ON; picture OFF by this trial" : "ON; monitoring near zone";
-    else if (tv_fresh(now) && power_ == Power::Standby) reason_ = "ON; paused: TV standby (will not wake)";
     else if (restore_pending_) reason_ = "ON; paused: picture recovery pending";
     else if (verify_ != RpcKind::None) reason_ = "ON; checking picture command";
+    else if (snoozed(now)) reason_ = "ON; paused: snoozed";
+    else if (tv_fresh(now) && power_ == Power::Standby) reason_ = "ON; paused: TV standby (will not wake)";
+    else if (external_override_ && healthy_(now) && power_ == Power::Active)
+      reason_ = "ON; paused: external picture change; waiting for clear zone";
   }
   Request start_(RpcKind kind, uint32_t now, Mode mode) {
     ++sequence_;
     if (sequence_ == 0) ++sequence_;
     request_at_ = now;
     if (kind == RpcKind::Query) query_epoch_ = connection_epoch_;
+    if (kind == RpcKind::Restore) requested_restore_mode_ = mode;
     in_flight_ = {kind, sequence_, mode};
     return in_flight_;
   }
@@ -276,7 +333,7 @@ class Controller {
   }
 
   bool enabled_{false}, link_{false}, radar_ready_{false}, radar_seen_{false};
-  bool monitoring_{false};
+  bool monitoring_{false}, external_override_{false}, snooze_active_{false};
   bool radar_measurement_known_{false};
   bool present_{false}, interval_valid_{false}, tv_valid_{false}, query_seen_{false};
   bool owned_{false}, confirmed_owned_{false}, restore_pending_{false}, manual_restore_{false};
@@ -285,8 +342,9 @@ class Controller {
   uint32_t command_at_{0}, request_at_{0}, sequence_{0};
   uint32_t connection_epoch_{0}, query_epoch_{0};
   uint32_t near_ms_{NEAR_MS},away_ms_{AWAY_MS};
+  uint32_t snooze_at_{0}, snooze_duration_ms_{0};
   Power power_{Power::Unknown};
-  Mode mode_{Mode::Unknown}, restore_mode_{Mode::Normal};
+  Mode mode_{Mode::Unknown}, restore_mode_{Mode::Normal}, requested_restore_mode_{Mode::Normal};
   RpcKind verify_{RpcKind::None};
   Request in_flight_{};
   const char *reason_{"Trial OFF"};

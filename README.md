@@ -8,7 +8,8 @@
 
 This is an independent radar-based distance assistant. The controller, web interface and settings storage run on the ESP32. Once configured, it needs continuous USB power and a working local network; no always-on computer, AI agent, Home Assistant or cloud service is required. **The device web interface is currently in Chinese.** This repository provides English and Simplified Chinese documentation.
 
-<p align="center"><img src="docs/assets/app-home.jpg" width="300" alt="Chinese device interface showing distance status, the automation switch and settings controls"></p>
+<p align="center"><img src="docs/assets/app-home.jpg" width="300" alt="Current Guanju home screen in a simulated browser preview"></p>
+<p align="center"><em>Current interface in a simulated browser preview; not a real-hardware or iPhone validation.</em></p>
 
 [Get started](docs/en/getting-started.md) · [Hardware and wiring](docs/en/hardware.md) · [Set up with an AI agent](docs/en/ai-assisted-setup.md) · [TV compatibility](docs/en/compatibility.md) · [MIT license](LICENSE)
 
@@ -17,6 +18,9 @@ This is an independent radar-based distance assistant. The controller, web inter
 - Turns the TV picture off when a valid nearby target remains within the configured distance for the confirmation period. Restores the picture it turned off when the target leaves the near zone; TV power stays on.
 - Saves your automation preference. Standby pauses monitoring; switching the TV back on resumes it when the device is healthy. The controller never wakes or powers on the TV.
 - Hosts a phone-friendly web interface with a single-screen home view, animated status scene, settings panel, reset to defaults and manual picture recovery. Supports adding a shortcut to the iPhone Home Screen; the refresh button reloads the entire page.
+- Adds 10/30-minute pauses without changing the saved ON preference, and respects an externally restored picture until the near zone clears. Never wakes the TV.
+- Uses a provisional 20 cm release margin and recent supporting radar samples to reduce boundary chatter; actual behavior still needs room-specific calibration.
+- Keeps the home simple; optional foreground-only diagnostics show valid approximate distances and at most 12 recent events. Guided four-step observation advises but never applies settings; snapshots are not a lossless radar recording.
 - Offers adjustable distance, approach confirmation, radar absence delay, recovery confirmation and three sensitivity profiles. Settings take effect only after verified radar readback and successful persistence.
 - Uses USB for the first installation and supports subsequent updates over local Wi-Fi. Web assets and icons are embedded in the firmware, with no CDN dependency.
 

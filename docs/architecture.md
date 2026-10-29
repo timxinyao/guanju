@@ -13,3 +13,9 @@ ESP32-C3 运行 ESPHome，LD2410C 经 GPIO20/21 的硬件 UART 提供雷达数�
 网页从设备提供 CSS/JS，消费 `/events` 的 SSE 原始实体名称（例如 `binary_sensor/Radar Data Fresh`），结合心跳、新鲜度和设置派生展示。雷达波纹只反映数据新鲜在线，不说明自动监测生效；近/远/无人图为示意。右上刷新执行整个页面 reload。设备提供三个 PNG 图标路由：`/apple-touch-icon.png`、`/apple-touch-icon-v1.png` 和 `/apple-touch-icon-precomposed.png`。已有主屏幕图标可能缓存，需移除重加。
 
 正式 YAML 配置原生 ESPHome OTA，未启用网页 OTA、Home Assistant 原生 API 或配网门户。观察版和联网观察版不控制电视，具体阶段及命令见[入门](getting-started.md)。实现细节以 `firmware/tv_trial_runtime.h`、`tv_trial_controller.h`、`tv_trial_settings*.h` 和 `firmware/ui/` 为准。
+
+## 有界诊断与周期验证
+
+`GET /diagnostics` 提供主循环缓存、带版本的只读快照，不开放原始 UART。HTTP 在短锁内复制固定 POD 快照，锁外使用 handler 唯一固定缓冲格式化。全局每秒一次准入、单个在途响应与 4,096 字节缓冲限制额外诊断负担。12 条 RAM 环形记录保存观察到的状态/区域/设置/审计变化及设置电视画面的请求/结果，不逐帧写 flash，不保证无损回放；日常电视查询不填充事件队列。完整 schema、429 退避及电脑侧采集见[本地诊断](diagnostics.md)。
+
+运行时每 30 秒审计硬件参数。每次要求参数和分辨率响应序号均在请求后的 3 秒内前进；一次有界重试会重新建立基线，目标周期帧不能替代参数读回。重试失败以 `parameter_audit_timeout` 暂停监测，直到显式设置事务成功。现有控制器保留 ON 意图，并在可达时只恢复本次负责的画面。临时暂停 10/30 分钟和恢复使用现有 ESPHome 按钮路由，不增加 RPC worker、SSE 连接或持久化计时器。

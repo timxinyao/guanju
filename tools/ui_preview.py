@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local-only ESPHome UI fixture; no hardware or external network access."""
 import argparse
+import copy
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
 
@@ -61,11 +63,25 @@ def schedule_timer(delay, callback):
 
 
 class Fixture:
-    def __init__(self, schedule=schedule_timer):
+    def __init__(self, schedule=schedule_timer, clock=time.monotonic):
         self.schedule = schedule
+        self.clock = clock
         self.lock = threading.RLock()
         self.clients = set()
-        self.started = time.monotonic()
+        self.started = self.clock()
+        self.session_id = uuid.uuid4().hex[:16]
+        self.snapshot_sequence = 0
+        self.sample_sequence = 0
+        self.sample_at_ms = 0
+        self.snapshot_at = None
+        self.cached_diagnostics = None
+        self.last_diagnostics_request = None
+        self.recent_events = []
+        self.event_sequence = 0
+        self.events_dropped = 0
+        self.snooze_until = 0
+        self.pause_token = 0
+        self.external_override = False
         self.epoch = 0
         self.offline = False
         self.expired = False
@@ -105,7 +121,7 @@ class Fixture:
         domain, name = key.split('/', 1)
         value = self.states[key]
         if key == 'sensor/Uptime':
-            value = int(time.monotonic() - self.started)
+            value = int(self.clock() - self.started)
         state = ('ON' if value else 'OFF') if isinstance(value, bool) else str(value)
         result = {'id': key, 'value': value, 'state': state}
         if detail:
@@ -118,8 +134,23 @@ class Fixture:
             for client in self.clients:
                 client.put(item)
 
+    def record_event(self, event_type, detail):
+        self.event_sequence += 1
+        self.recent_events.append({'sequence': self.event_sequence, 'at_ms': self.uptime_ms(),
+                                   'type': event_type, 'detail': str(detail)[:63]})
+        if len(self.recent_events) > 12:
+            self.recent_events.pop(0)
+            self.events_dropped += 1
+
+    def uptime_ms(self):
+        return int((self.clock() - self.started) * 1000)
+
     def update(self, values):
+        event_types = {'switch/TV Trial': 'intent', 'text_sensor/Trial Status': 'reason',
+                       'text_sensor/TV Status': 'tv', 'text_sensor/Scene Presence': 'zone'}
         for key, value in values.items():
+            if key in event_types and self.states.get(key) != value:
+                self.record_event(event_types[key], value)
             self.states[key] = value
             self.publish(key)
 
@@ -127,10 +158,16 @@ class Fixture:
         """Mirror the controller's reported intent and effective health states."""
         if not self.states['switch/TV Trial']:
             return False, 'OFF; picture recovery pending' if self.recovery_pending else 'Trial OFF'
-        if self.settings_status == 'applying':
-            return False, 'ON; paused: settings applying'
+        if self.settings_status != 'ready':
+            return False, 'ON; paused: settings applying' if self.settings_status == 'applying' else 'ON; paused: radar range not verified'
         if self.recovery_pending:
             return False, 'ON; paused: picture recovery pending'
+        if self.snooze_until > self.clock():
+            return False, 'ON; paused: snoozed'
+        if self.external_override:
+            return False, 'ON; paused: external picture change; waiting for clear zone'
+        if self.offline or self.expired:
+            return False, 'ON; paused: radar data expired'
         if not self.states['binary_sensor/Radar Data Fresh']:
             return False, 'ON; paused: radar unavailable'
         if not self.states['binary_sensor/Radar Measurement Known']:
@@ -145,6 +182,96 @@ class Fixture:
     def report_health(self):
         monitoring, status = self.health_status()
         self.update({'binary_sensor/Trial Monitoring': monitoring, 'text_sensor/Trial Status': status})
+
+    def expire_pause(self):
+        if self.snooze_until and self.clock() >= self.snooze_until:
+            self.snooze_until = 0
+            self.record_event('pause', 'expired')
+            self.report_health()
+
+    def pause(self, minutes):
+        with self.lock:
+            if minutes not in (10, 30) or not self.states['switch/TV Trial']:
+                return
+            self.pause_token += 1
+            token = self.pause_token
+            self.snooze_until = self.clock() + minutes * 60
+            if (self.states['binary_sensor/Trial Owns Picture Off']
+                    and self.states['binary_sensor/TV Connected']
+                    and self.states['text_sensor/TV Status'].startswith('Active / ')):
+                self.recovery_pending = False
+                self.update({'binary_sensor/Trial Owns Picture Off': False,
+                             'text_sensor/TV Status': 'Active / picture visible'})
+            self.record_event('pause', str(minutes) + ' minutes')
+            self.report_health()
+            def finish():
+                with self.lock:
+                    if token == self.pause_token:
+                        self.expire_pause()
+            self.schedule(minutes * 60, finish)
+
+    def resume(self):
+        with self.lock:
+            self.pause_token += 1
+            self.snooze_until = 0
+            self.record_event('pause', 'resume requested')
+            self.report_health()
+
+    def diagnostics_snapshot(self):
+        """Bounded simulated snapshot, not a recording of every radar frame."""
+        with self.lock:
+            now = self.clock()
+            if self.snapshot_at is not None and now - self.snapshot_at < 1:
+                return copy.deepcopy(self.cached_diagnostics)
+            self.expire_pause()
+            fresh = bool(self.states['binary_sensor/Radar Data Fresh'] and not self.expired and not self.offline)
+            known = bool(self.states['binary_sensor/Radar Measurement Known'] and fresh)
+            tv_fresh = bool(self.states['binary_sensor/TV Connected'] and not self.expired and not self.offline)
+            if fresh:
+                self.sample_sequence += 1
+                self.sample_at_ms = self.uptime_ms()
+            zone = {'Near': 'near', 'Far': 'far', 'Absent': 'absent'}.get(self.states['text_sensor/Scene Presence'], 'unknown')
+            if not fresh:
+                zone = 'unavailable'
+            elif not known:
+                zone = 'unknown'
+            distances = {}
+            for category, title in [('moving', 'Moving'), ('still', 'Still')]:
+                distance = self.states['sensor/' + title + ' Distance']
+                valid = (known and zone in ('near', 'far') and bool(self.states['binary_sensor/' + title + ' Target'])
+                         and isinstance(distance, (int, float)) and 0 < distance <= 600)
+                distances[category + '_cm'] = distance if valid else None
+                distances[category + '_valid'] = valid
+            tv_status = self.states['text_sensor/TV Status']
+            power = 'unknown' if not tv_fresh else 'standby' if tv_status == 'Standby (will not wake)' else 'active' if tv_status.startswith('Active / ') else 'unknown'
+            mode = 'unknown' if power != 'active' else 'picture_off' if tv_status == 'Active / pictureOff' else 'normal'
+            self.snapshot_sequence += 1
+            monitoring, reason = self.health_status()
+            self.cached_diagnostics = {
+                'schema_version': 1, 'session_id': self.session_id, 'sequence': self.snapshot_sequence,
+                'uptime_ms': self.uptime_ms(), 'sample_sequence': self.sample_sequence, 'sample_at_ms': self.sample_at_ms,
+                'config_revision': self.settings_revision, 'near_threshold_cm': self.settings['distance_cm'],
+                'release_threshold_cm': self.settings['distance_cm'] + 20, 'zone': zone, 'distance': distances,
+                'health': {'wifi_connected': not self.offline, 'radar_fresh': fresh, 'measurement_known': known,
+                           'tv_fresh': tv_fresh, 'settings_ready': self.settings_status == 'ready', 'parameter_audit': 'idle'},
+                'intent_enabled': self.states['switch/TV Trial'], 'monitoring': monitoring,
+                'reason': reason, 'tv': {'power': power, 'mode': mode, 'owns_picture_off': self.states['binary_sensor/Trial Owns Picture Off']},
+                'snooze_remaining_ms': max(0, int((self.snooze_until - now) * 1000)),
+                'external_override': self.external_override, 'recent_events': copy.deepcopy(self.recent_events),
+                'events_dropped': self.events_dropped,
+            }
+            self.snapshot_at = now
+            return copy.deepcopy(self.cached_diagnostics)
+
+    def diagnostics_request(self):
+        with self.lock:
+            if self.offline:
+                return 503, {'error': 'unavailable'}
+            now = self.clock()
+            if self.last_diagnostics_request is not None and now - self.last_diagnostics_request < 1:
+                return 429, {'error': 'rate_limited', 'retry_after_ms': 1000}
+            self.last_diagnostics_request = now
+            return 200, self.diagnostics_snapshot()
 
     def settings_snapshot(self):
         return {'revision': self.settings_revision, 'status': self.settings_status,
@@ -237,6 +364,7 @@ class Fixture:
             self.epoch += 1
             self.offline = name == 'Offline'
             self.expired = name == 'Expired'
+            self.external_override = name == 'ExternalRestore'
             if self.offline:
                 for client in self.clients:
                     client.put(None)
@@ -255,11 +383,11 @@ class Fixture:
             changes = {
                 'binary_sensor/TV Connected': name not in ('Unavailable', 'TVUnknown', 'TVFailure'),
                 'text_sensor/TV Status': {'Standby': 'Standby (will not wake)', 'PictureOff': 'Active / pictureOff', 'RestoreTransition': 'Active / pictureOff', 'Unavailable': 'Unavailable / state expired', 'TVUnknown': 'Unavailable / state expired', 'TVFailure': 'Unavailable / state expired'}.get(name, 'Active / picture visible'),
-                'binary_sensor/Trial Owns Picture Off': (True if name in ('PictureOff', 'RestoreTransition') else False if name in ('Normal', 'Near', 'Far', 'Standby', 'HideTransition') else self.states['binary_sensor/Trial Owns Picture Off']),
+                'binary_sensor/Trial Owns Picture Off': (True if name in ('PictureOff', 'RestoreTransition') else False if name in ('Normal', 'Near', 'Far', 'Standby', 'HideTransition', 'ExternalRestore') else self.states['binary_sensor/Trial Owns Picture Off']),
             }
-            if name not in ('PictureOff', 'HideTransition', 'RestoreTransition'):
+            if name not in ('PictureOff', 'HideTransition', 'RestoreTransition', 'ExternalRestore', 'Expired'):
                 changes.update(radar_changes)
-            if name in ('Normal', 'Near', 'Far', 'Standby', 'HideTransition', 'RestoreTransition', 'TVUnknown', 'TVFailure'):
+            if name in ('Normal', 'Near', 'Far', 'Standby', 'HideTransition', 'RestoreTransition', 'TVUnknown', 'TVFailure', 'ExternalRestore'):
                 self.recovery_pending = False
             self.update(changes)
             self.report_health()
@@ -289,6 +417,10 @@ class Fixture:
                 self.restore()
                 return
             self.epoch += 1
+            if not value:
+                self.snooze_until = 0
+                self.pause_token += 1
+                self.external_override = False
             self.update({'switch/TV Trial': value})
             self.report_health()
 
@@ -297,6 +429,9 @@ class Fixture:
             self.epoch += 1
             epoch = self.epoch
             self.recovery_pending = True
+            self.snooze_until = 0
+            self.pause_token += 1
+            self.external_override = False
             self.update({'switch/TV Trial': False, 'binary_sensor/Trial Monitoring': False, 'text_sensor/Trial Status': 'OFF; picture recovery pending'})
         def finish():
             with self.lock:
@@ -309,7 +444,7 @@ class Fixture:
         timer.start()
 
 
-FIXTURE_HTML = '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>UI fixture controls</title><body><h1>Local UI fixture</h1><p>These controls change temporary simulated data only. <a href="/">Open app</a></p><div id="buttons"></div><p id="result" role="status"></p><script>for (const name of ['Normal','Near','Far','Standby','Unknown','Unavailable','PictureOff','HideTransition','RestoreTransition','TVUnknown','TVFailure','Expired','Offline','SettingsFail','SettingsConflict']) {const b=document.createElement('button'); b.textContent=name; b.onclick=async()=>{const r=await fetch('/_fixture/'+name,{method:'POST'}); document.querySelector('#result').textContent=r.ok?'Scenario: '+name:'Failed: '+r.status}; document.querySelector('#buttons').append(b)}</script></body></html>'''
+FIXTURE_HTML = '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>UI fixture controls</title><body><h1>Local UI fixture</h1><p>These controls change temporary simulated data only. <a href="/">Open app</a></p><div id="buttons"></div><p id="result" role="status"></p><script>for (const name of ['Normal','Near','Far','Standby','Unknown','Unavailable','PictureOff','HideTransition','RestoreTransition','TVUnknown','TVFailure','Expired','Offline','ExternalRestore','SettingsFail','SettingsConflict']) {const b=document.createElement('button'); b.textContent=name; b.onclick=async()=>{const r=await fetch('/_fixture/'+name,{method:'POST'}); document.querySelector('#result').textContent=r.ok?'Scenario: '+name:'Failed: '+r.status}; document.querySelector('#buttons').append(b)}</script></body></html>'''
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -319,11 +454,13 @@ class Handler(BaseHTTPRequestHandler):
         # Requests carry no user input worth logging; avoid ever logging credentials.
         pass
 
-    def reply(self, status, body=b'', content_type='text/plain; charset=utf-8'):
+    def reply(self, status, body=b'', content_type='text/plain; charset=utf-8', headers=None):
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -342,6 +479,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(404)
         if path == '/events':
             return self.events()
+        if path == '/diagnostics':
+            code, payload = fixture.diagnostics_request()
+            return self.reply(code, json.dumps(payload).encode(), 'application/json',
+                              {'Retry-After': '1'} if code == 429 else None)
         key = unquote(path.lstrip('/'))
         with fixture.lock:
             if fixture.offline:
@@ -357,7 +498,7 @@ class Handler(BaseHTTPRequestHandler):
         fixture = self.server.fixture
         if path.startswith('/_fixture/'):
             name = path.removeprefix('/_fixture/')
-            if name in ('Normal', 'Near', 'Far', 'Standby', 'Unknown', 'Unavailable', 'PictureOff', 'HideTransition', 'RestoreTransition', 'TVUnknown', 'TVFailure', 'Expired', 'Offline', 'SettingsFail', 'SettingsConflict'):
+            if name in ('Normal', 'Near', 'Far', 'Standby', 'Unknown', 'Unavailable', 'PictureOff', 'HideTransition', 'RestoreTransition', 'TVUnknown', 'TVFailure', 'Expired', 'Offline', 'ExternalRestore', 'SettingsFail', 'SettingsConflict'):
                 fixture.scenario(name)
                 return self.reply(200)
             return self.reply(404)
@@ -378,6 +519,12 @@ class Handler(BaseHTTPRequestHandler):
             decoded = unquote(path)
             if decoded in ('/switch/TV Trial/turn_on', '/switch/TV Trial/turn_off'):
                 fixture.switch(decoded.endswith('/turn_on'))
+                return self.reply(200)
+            if decoded in ('/button/Pause 10 Minutes/press', '/button/Pause 30 Minutes/press'):
+                fixture.pause(10 if '10 Minutes' in decoded else 30)
+                return self.reply(200)
+            if decoded == '/button/Resume Monitoring/press':
+                fixture.resume()
                 return self.reply(200)
             if decoded == '/button/Restore Picture/press':
                 fixture.restore()
