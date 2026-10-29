@@ -54,8 +54,15 @@ def record_status():
     return ('running' if matching(record) else 'unverified'), record
 
 
+def schedule_timer(delay, callback):
+    timer = threading.Timer(delay, callback)
+    timer.daemon = True
+    timer.start()
+
+
 class Fixture:
-    def __init__(self):
+    def __init__(self, schedule=schedule_timer):
+        self.schedule = schedule
         self.lock = threading.RLock()
         self.clients = set()
         self.started = time.monotonic()
@@ -234,23 +241,43 @@ class Fixture:
                 for client in self.clients:
                     client.put(None)
                 return
+            epoch = self.epoch
             changes = {
                 'binary_sensor/Radar Data Fresh': name != 'Unavailable',
                 'binary_sensor/Radar Measurement Known': name not in ('Unknown', 'Unavailable'),
-                'binary_sensor/TV Connected': name != 'Unavailable',
+                'binary_sensor/TV Connected': name not in ('Unavailable', 'TVUnknown', 'TVFailure'),
                 'binary_sensor/Moving Target': name in ('Near', 'Far'),
                 'binary_sensor/Still Target': False,
                 'sensor/Moving Distance': 100 if name == 'Near' else 250 if name == 'Far' else 0,
                 'sensor/Detection Distance': 100 if name == 'Near' else 250 if name == 'Far' else 0,
                 'text_sensor/Near Zone': {'Near': 'Presence', 'Unknown': 'Unknown', 'Unavailable': 'Unavailable'}.get(name, 'Clear'),
                 'text_sensor/Scene Presence': {'Near': 'Near', 'Far': 'Far', 'Unknown': 'Unknown', 'Unavailable': 'Unavailable'}.get(name, 'Absent'),
-                'text_sensor/TV Status': {'Standby': 'Standby (will not wake)', 'PictureOff': 'Active / pictureOff', 'Unavailable': 'Unavailable / state expired'}.get(name, 'Active / picture visible'),
-                'binary_sensor/Trial Owns Picture Off': (True if name == 'PictureOff' else False if name in ('Normal', 'Near', 'Far', 'Standby') else self.states['binary_sensor/Trial Owns Picture Off']),
+                'text_sensor/TV Status': {'Standby': 'Standby (will not wake)', 'PictureOff': 'Active / pictureOff', 'RestoreTransition': 'Active / pictureOff', 'Unavailable': 'Unavailable / state expired', 'TVUnknown': 'Unavailable / state expired', 'TVFailure': 'Unavailable / state expired'}.get(name, 'Active / picture visible'),
+                'binary_sensor/Trial Owns Picture Off': (True if name in ('PictureOff', 'RestoreTransition') else False if name in ('Normal', 'Near', 'Far', 'Standby', 'HideTransition') else self.states['binary_sensor/Trial Owns Picture Off']),
             }
-            if name in ('Normal', 'Near', 'Far', 'Standby'):
+            if name in ('Normal', 'Near', 'Far', 'Standby', 'HideTransition', 'RestoreTransition', 'TVUnknown', 'TVFailure'):
                 self.recovery_pending = False
             self.update(changes)
             self.report_health()
+            if name == 'TVFailure':
+                self.update({'switch/TV Trial': True, 'binary_sensor/Trial Monitoring': False,
+                             'text_sensor/Trial Status': 'ON; paused: TV communication failed'})
+            if name in ('HideTransition', 'RestoreTransition'):
+                def transition(tv_status, connected, owned):
+                    with self.lock:
+                        if epoch != self.epoch:
+                            return
+                        self.update({'text_sensor/TV Status': tv_status,
+                                     'binary_sensor/TV Connected': connected,
+                                     'binary_sensor/Trial Owns Picture Off': owned})
+                        self.report_health()
+                # Let clients observe the initial confirmed state, then simulate
+                # 1.5 seconds of uncertainty before the confirmed end state.
+                owned_before = name == 'RestoreTransition'
+                self.schedule(.25, lambda: transition('Unavailable / state expired', False, owned_before))
+                self.schedule(1.75, lambda: transition(
+                    'Active / pictureOff' if name == 'HideTransition' else 'Active / picture visible',
+                    True, not owned_before))
 
     def switch(self, value):
         with self.lock:
@@ -278,7 +305,7 @@ class Fixture:
         timer.start()
 
 
-FIXTURE_HTML = '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>UI fixture controls</title><body><h1>Local UI fixture</h1><p>These controls change temporary simulated data only. <a href="/">Open app</a></p><div id="buttons"></div><p id="result" role="status"></p><script>for (const name of ['Normal','Near','Far','Standby','Unknown','Unavailable','PictureOff','Expired','Offline','SettingsFail','SettingsConflict']) {const b=document.createElement('button'); b.textContent=name; b.onclick=async()=>{const r=await fetch('/_fixture/'+name,{method:'POST'}); document.querySelector('#result').textContent=r.ok?'Scenario: '+name:'Failed: '+r.status}; document.querySelector('#buttons').append(b)}</script></body></html>'''
+FIXTURE_HTML = '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>UI fixture controls</title><body><h1>Local UI fixture</h1><p>These controls change temporary simulated data only. <a href="/">Open app</a></p><div id="buttons"></div><p id="result" role="status"></p><script>for (const name of ['Normal','Near','Far','Standby','Unknown','Unavailable','PictureOff','HideTransition','RestoreTransition','TVUnknown','TVFailure','Expired','Offline','SettingsFail','SettingsConflict']) {const b=document.createElement('button'); b.textContent=name; b.onclick=async()=>{const r=await fetch('/_fixture/'+name,{method:'POST'}); document.querySelector('#result').textContent=r.ok?'Scenario: '+name:'Failed: '+r.status}; document.querySelector('#buttons').append(b)}</script></body></html>'''
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -326,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
         fixture = self.server.fixture
         if path.startswith('/_fixture/'):
             name = path.removeprefix('/_fixture/')
-            if name in ('Normal', 'Near', 'Far', 'Standby', 'Unknown', 'Unavailable', 'PictureOff', 'Expired', 'Offline', 'SettingsFail', 'SettingsConflict'):
+            if name in ('Normal', 'Near', 'Far', 'Standby', 'Unknown', 'Unavailable', 'PictureOff', 'HideTransition', 'RestoreTransition', 'TVUnknown', 'TVFailure', 'Expired', 'Offline', 'SettingsFail', 'SettingsConflict'):
                 fixture.scenario(name)
                 return self.reply(200)
             return self.reply(404)

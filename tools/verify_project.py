@@ -96,7 +96,7 @@ def main():
         for test in sorted((ROOT / 'firmware/ui').glob('*.test.cjs')):
             run(['node', str(test.relative_to(ROOT))])
         run(['node', '--check', 'firmware/ui/app.js'])
-        run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_verify_project.py'])
+        run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*.py'])
         with tempfile.TemporaryDirectory(prefix='guanju-icon-') as folder:
             generated = Path(folder) / 'icon.h'
             run([sys.executable, 'tools/embed_app_icon.py', 'firmware/ui/apple-touch-icon.png', str(generated)])

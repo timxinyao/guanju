@@ -79,6 +79,54 @@
   function deriveScanning(states, alive) {
     return alive && on(value(states, IDS.radar));
   }
+  // Presentation is deliberately separate from raw device state and control permissions.
+  function createTvPresentation() {
+    let session = null, confirmed = null, unknownSince = null;
+    const confirmedKinds = {
+      'Active / picture visible': 'visible', 'Active / pictureOff': 'off',
+      'Standby (will not wake)': 'standby'
+    };
+    const faults = {
+      'ON; paused: TV communication failed': '电视通信失败',
+      'ON; paused: TV rejected pictureOff': '电视拒绝关闭画面',
+      'ON; command uncertain / failed; recovery pending': '画面操作未确认',
+      'ON; hide not confirmed; recovery pending': '息屏未确认',
+      'ON; RPC stalled; waiting without parallel request': '电视请求超时'
+    };
+    const titles = { connecting: '正在连接', visible: '画面正常', off: '画面已关闭', standby: '电视待机中', unknown: '电视状态待确认', offline: '设备已断开' };
+    return { update(states, alive, generation, now, initialConnecting = false) {
+      if (generation !== session) { session = generation; confirmed = null; unknownSince = null; }
+      if (!alive) { confirmed = null; unknownSince = null; const kind = initialConnecting ? 'connecting' : 'offline'; return { kind, title: titles[kind] }; }
+      const status = value(states, IDS.status);
+      const fault = typeof status === 'string' && Object.prototype.hasOwnProperty.call(faults, status) ? faults[status] : null;
+      if (fault) { confirmed = null; unknownSince = null; return { kind: 'fault', title: fault }; }
+      const complete = CORE.every(id => value(states, id) !== null && value(states, id) !== '');
+      const tv = value(states, IDS.tv);
+      const kind = complete && typeof tv === 'string' && Object.prototype.hasOwnProperty.call(confirmedKinds, tv) ? confirmedKinds[tv] : null;
+      if (kind) { confirmed = kind; unknownSince = null; return { kind, title: titles[kind] }; }
+      if (unknownSince === null) unknownSince = now;
+      const result = now - unknownSince < 5000 ? (confirmed || 'connecting') : 'unknown';
+      return { kind: result, title: titles[result], ...(result !== 'unknown' ? { deadline: unknownSince + 5000 } : {}) };
+    } };
+  }
+  function createSceneMotion() {
+    let target = null, token = 0, running = false;
+    const visible = state => state === 'near' || state === 'far';
+    return {
+      update(next) {
+        if (next === target) return { target, animate: false, token, running };
+        const animate = visible(target) && visible(next);
+        target = next; running = animate; token++;
+        return { target, animate, token, running };
+      },
+      finish(completed) { if (completed !== token || !running) return false; running = false; return true; },
+      stop() { token++; running = false; }
+    };
+  }
+  function sceneTrajectory(x, y, target) {
+    const destination = target === 'far' ? 52 : 0;
+    return [{ x, y }, { x: x / 2 + 13, y: (y + destination) / 2 }, { x: 0, y: destination }];
+  }
   const SETTINGS_KEYS = ['distance_cm', 'near_ms', 'radar_timeout_s', 'clear_ms', 'sensitivity'];
   const DEFAULT_SETTINGS = { distance_cm: 150, near_ms: 3000, radar_timeout_s: 1, clear_ms: 1000, sensitivity: 'standard' };
   function validateSettings(s) {
@@ -139,7 +187,7 @@
     if (!alive || v == null || v === '' || v === 'unknown' || v === 'Unknown' || v === 'NA') return '未知';
     if ([IDS.monitoring, IDS.radar, IDS.known, IDS.owns].includes(id)) return on(v) ? '是' : off(v) ? '否' : '未知';
     if (id === IDS.range && typeof v === 'string' && v.startsWith('Nominal 1.5 m (gate 2), 0.75 m steps; radar delay 1 s')) return '约 1.5 米，雷达无人延时 1 秒';
-    if ([IDS.status, IDS.range, IDS.tv].includes(id)) return translations[v] || '状态未知';
+    if ([IDS.status, IDS.range, IDS.tv].includes(id)) return typeof v === 'string' && Object.prototype.hasOwnProperty.call(translations, v) ? translations[v] : '状态未知';
     if (id === IDS.signal && typeof v === 'number' && Number.isFinite(v)) return `${v} dBm`;
     if (id === IDS.uptime && typeof v === 'number' && Number.isFinite(v)) return `${Math.floor(v)} 秒`;
     if ([IDS.ip, IDS.firmware].includes(id) && typeof v === 'string' && /^[\w.:-]+$/.test(v)) return v;
@@ -181,7 +229,7 @@
       canSwitch: alive && intentKnown, canRestore: alive && intentKnown && active };
   }
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { IDS, derive, deriveScene, deriveScanning, isAlive, acceptState, detailValue, supportsNativeSwitch, applyVersionedState, boundedRequest, readEntity, runExclusive, createRequestQueue, validateSettings, sameSettings, pollSettings };
+    module.exports = { IDS, derive, deriveScene, deriveScanning, createTvPresentation, createSceneMotion, sceneTrajectory, isAlive, acceptState, detailValue, supportsNativeSwitch, applyVersionedState, boundedRequest, readEntity, runExclusive, createRequestQueue, validateSettings, sameSettings, pollSettings };
     return;
   }
   const meta = (name, content, attr = 'name') => {
@@ -201,23 +249,27 @@
 
   const markup = `
     <main class="app-shell" id="main-content">
-      <header class="topbar"><div><h1>观距</h1><p>电视距离助手</p></div>
+      <header class="topbar"><div><h1>观距</h1></div>
         <nav class="header-actions" aria-label="设备操作"><button class="header-action refresh" id="refresh" aria-label="刷新网页" title="刷新网页"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v-4m0 0h-4m4 0-3 3A8 8 0 1 0 20 13"/></svg></button><button class="header-action" id="settings-open" aria-label="参数设置" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="8" cy="7" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="10" cy="17" r="2"/></svg></button><button class="header-action" id="details-open" aria-label="设备详情" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5m0-8h.01"/></svg></button></nav>
       </header>
-      <section class="summary" aria-live="polite"><div class="connection"><span class="dot"></span><span id="connection">正在连接</span></div><h2 id="headline">状态未知</h2></section>
-      <section class="scene" data-state="unknown" data-monitoring="false" aria-label="雷达探测和电视沙发示意图">
+      <section class="summary" aria-live="polite" data-tv="connecting"><h2><span class="dot" aria-hidden="true"></span><span id="headline">正在连接</span></h2><span class="sr-only" id="connection">设备正在连接</span></section>
+      <section class="scene" data-state="unknown" data-monitoring="false" data-tv="connecting" aria-label="雷达探测和电视沙发示意图">
         <svg viewBox="0 0 360 224" role="img" aria-hidden="true"><defs><linearGradient id="screen" x2="0" y2="1"><stop stop-color="#f7faf8"/><stop offset="1" stop-color="#e2ece5"/></linearGradient><clipPath id="scan-clip"><rect x="10" y="111" width="340" height="113"/></clipPath></defs>
           <ellipse cx="180" cy="210" rx="100" ry="13" fill="#f2f7f3"/>
           <g clip-path="url(#scan-clip)" fill="none" stroke="#42654e" stroke-width="2.2"><g transform="translate(180 108)"><g class="scan-wave wave-one"><path d="M-14 6 Q0 25 14 6"/></g><g class="scan-wave wave-two"><path d="M-14 6 Q0 25 14 6"/></g><g class="scan-wave wave-three"><path d="M-14 6 Q0 25 14 6"/></g></g></g>
-          <rect x="104" y="8" width="152" height="77" rx="1" fill="url(#screen)" stroke="#536d61" stroke-width="1.4"/><path d="M106 53q27-20 51-9t51-3q23-13 46-7v49H106Z" fill="#dfeae3" opacity=".65"/><path d="M106 59q26-10 51 3t50-5q27-13 47-10v36H106Z" fill="#d5e4d9" opacity=".6"/><path d="M177 85v5m6-5v5m-23 3 20-3 20 3" fill="none" stroke="#536d61" stroke-width="2" stroke-linecap="round"/>
+          <rect x="104" y="8" width="152" height="77" rx="1" fill="url(#screen)" stroke="#536d61" stroke-width="1.4"/><g class="screen-landscape"><path d="M106 53q27-20 51-9t51-3q23-13 46-7v49H106Z" fill="#dfeae3" opacity=".65"/><path d="M106 59q26-10 51 3t50-5q27-13 47-10v36H106Z" fill="#d5e4d9" opacity=".6"/></g><rect class="screen-overlay" x="106" y="10" width="148" height="73"/><path d="M177 85v5m6-5v5m-23 3 20-3 20 3" fill="none" stroke="#536d61" stroke-width="2" stroke-linecap="round"/>
           <rect x="94" y="93" width="172" height="18" rx="1" fill="#f8fbf9" stroke="#6d8379"/><path d="M137 94v16m86-16v16m-125 1-2 5m165-5 2 5" stroke="#6d8379" fill="none"/>
           <g stroke="#536d61" stroke-width="1.1" fill="#f9fcfa"><rect x="118" y="177" width="124" height="32" rx="8"/><path d="M118 189v-3q0-10 10-10h43q9 0 9 9 0-9 9-9h43q10 0 10 10v3"/></g>
-          <g class="scene-person scene-far" stroke="#42654e" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><path d="M169 191v-7q0-8 7-9h8q7 1 7 9v7Z" fill="#dcebe0"/><circle cx="180" cy="168" r="7" fill="#f8fbf9"/><path d="M173 168q-1-8 7-8t7 8q-3-1-4-4-3 4-10 4Z" fill="#6d8a76"/></g>
           <g stroke="#536d61" stroke-width="1.1" fill="#f9fcfa"><rect x="106" y="185" width="12" height="33" rx="6"/><rect x="242" y="185" width="12" height="33" rx="6"/><rect x="116" y="188" width="128" height="31" rx="4"/><path d="M120 219l-1 7h4l2-7m110 0 2 7h4l-1-7"/></g>
-          <g class="scene-person scene-near" stroke="#42654e" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="180" cy="119" r="7" fill="#f8fbf9"/><path d="M173 119q-1-8 7-8t7 8q-3-1-4-4-3 4-10 4Z" fill="#6d8a76"/><path d="M176 127h8q3 0 5 3l3 5-3 2-3-4v9h-12v-9l-3 4-3-2 3-5q2-3 5-3Z" fill="#dcebe0"/><path d="M174 142h12l1 7h-6l-1-3-1 3h-6Z" fill="#a8c5af"/><path d="M176 149v5m8-5v5" fill="none" stroke-width="2"/><path d="M174 155h4m5 0h4" fill="none" stroke-width="2.5"/></g>
+          <g class="scene-actor" aria-hidden="true"><g class="actor-body" stroke="#536d61" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
+            <g class="actor-leg leg-left"><path d="M176 145l-1 7m-2 1h5" fill="none" stroke-width="2"/></g><g class="actor-leg leg-right"><path d="M184 145l1 7m-1 1h5" fill="none" stroke-width="2"/></g>
+            <path class="seated-legs" d="M174 143q-5 2-4 6l5 2m11-8q5 2 4 6l-5 2m-12 0h4m6 0h4" fill="none" stroke-width="2"/>
+            <g class="actor-arm arm-left"><path d="M175 131l-5 7" fill="none" stroke-width="2.2"/></g><g class="actor-arm arm-right"><path d="M185 131l5 7" fill="none" stroke-width="2.2"/></g>
+            <path d="M175 128q5-2 10 0l5 17h-20Z" fill="#f3e4d3"/><path d="M174 144h12" fill="none" stroke="#a7bfa8"/>
+            <circle cx="180" cy="118" r="9" fill="#f8e8d8"/><path d="M171 118q-1-10 9-10t9 10q-3-1-5-5-4 5-13 5Z" fill="#748d78"/><path d="M171 114q-5-2-5 3 1 3 5 2m18-5q5-2 5 3-1 3-5 2" fill="#748d78"/><circle cx="177" cy="120" r=".7" fill="#536d61" stroke="none"/><circle cx="183" cy="120" r=".7" fill="#536d61" stroke="none"/><path d="M178 123q2 1 4 0" fill="none"/>
+          </g></g>
         </svg>
       </section>
-      <section class="near" aria-live="polite"><h3 id="zone-title">正在获取测距状态</h3><p id="zone-help">请稍候，或刷新设备状态</p></section>
       <section class="control-panel"><span class="tv-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1"/><path d="M9 20h6m-3-3v3"/></svg></span><div class="control-copy"><h3>自动息屏</h3><p id="control-help">等待设备状态</p></div><label class="switch-area"><input id="trial" type="checkbox" switch aria-label="自动息屏" disabled></label></section>
       <section class="rules" aria-label="自动息屏规则"><div><strong id="range">—</strong><span>近距范围</span></div><div><strong id="recovery-time">—</strong><span>基础恢复等待</span></div></section>
       <section class="restore"><button id="restore" disabled>恢复画面</button><p>恢复画面并关闭自动息屏</p></section>
@@ -257,6 +309,9 @@
     let source = null, lastEvent = 0, reconnectTimer = 0, retry = 1000, generation = 0, toastTimer = 0;
     let settingsData = null, settingsGeneration = -1, settingsRead = null, settingsMutation = 0, draft = null, draftRevision = null, dirty = false, conflict = false, settingsNotice = '';
     let previousFocus = null;
+    const tvPresentation = createTvPresentation(), sceneMotion = createSceneMotion();
+    let actorAnimation = null, presentationTimer = 0, presentationDeadline = null, connectionFailed = false, hasConnected = false;
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
     const text = (id, content) => { const node = el(id); if (node.textContent !== content) { node.textContent = content; if (node.animate && !matchMedia('(prefers-reduced-motion: reduce)').matches) node.animate([{ opacity: .45 }, { opacity: 1 }], { duration: 220, easing: 'ease-out' }); } };
     const apiPath = id => { const [domain, name] = id.split('/'); return '/' + domain + '/' + encodeURIComponent(name); };
     const request = (url, options = {}) => enqueue(() => boundedRequest(fetch, url, options), 0);
@@ -331,13 +386,46 @@
         row.lastChild.textContent = id === IDS.range ? (settingsGeneration === generation && settingsData && settingsData.status === 'ready' && isAlive(lastEvent, Date.now()) ? `${(settingsData.settings.distance_cm / 100).toFixed(1)} 米，雷达无人延时 ${settingsData.settings.radar_timeout_s} 秒` : '未知') : detailValue(id, value(states, id), isAlive(lastEvent, Date.now()));
       }
     }
+    reducedMotion.addEventListener('change', event => {
+      if (!event.matches) return;
+      sceneMotion.stop();
+      if (actorAnimation) { actorAnimation.cancel(); actorAnimation = null; }
+      app.querySelector('.scene').classList.remove('running');
+    });
+    function updateActor(target) {
+      const scene = app.querySelector('.scene'), actor = scene.querySelector('.scene-actor');
+      const move = sceneMotion.update(target);
+      if (scene.dataset.state === target) return;
+      // Capture the interpolated position before cancelling an obsolete trip.
+      const current = getComputedStyle(actor).transform;
+      if (actorAnimation) { actorAnimation.cancel(); actorAnimation = null; }
+      scene.classList.remove('running');
+      scene.dataset.state = target;
+      if (!move.animate || reducedMotion.matches || !actor.animate) { sceneMotion.stop(); return; }
+      const matrix = current === 'none' ? { e: 0, f: 0 } : new DOMMatrixReadOnly(current);
+      const points = sceneTrajectory(matrix.e, matrix.f, target);
+      actorAnimation = actor.animate(points.map(point => ({ transform: `translate(${point.x}px, ${point.y}px)` })),
+        { duration: 800, easing: 'ease-in-out' });
+      scene.classList.add('running');
+      actorAnimation.onfinish = () => {
+        if (!sceneMotion.finish(move.token)) return;
+        actorAnimation = null; scene.classList.remove('running');
+      };
+    }
     function render() {
-      const d = derive(states, isAlive(lastEvent, Date.now()));
-      app.querySelector('.scene').dataset.state = deriveScene(states, isAlive(lastEvent, Date.now()));
-      app.querySelector('.scene').dataset.monitoring = String(deriveScanning(states, isAlive(lastEvent, Date.now())));
-      text('connection', d.connected ? '设备在线' : '设备状态未知');
-      app.querySelector('.dot').classList.toggle('online', d.connected);
-      text('headline', d.headline); text('zone-title', d.zoneTitle); text('zone-help', d.zoneHelp); text('control-help', d.helper);
+      const now = Date.now(), alive = isAlive(lastEvent, now), d = derive(states, alive);
+      const presentation = tvPresentation.update(states, alive, generation, now, !connectionFailed && !hasConnected);
+      if (presentationDeadline !== (presentation.deadline ?? null)) {
+        clearTimeout(presentationTimer); presentationDeadline = presentation.deadline ?? null;
+        if (presentationDeadline !== null) presentationTimer = setTimeout(render, Math.max(0, presentationDeadline - now));
+      }
+      const scene = app.querySelector('.scene');
+      scene.dataset.tv = presentation.kind;
+      app.querySelector('.summary').dataset.tv = presentation.kind;
+      scene.dataset.monitoring = String(deriveScanning(states, alive));
+      updateActor(deriveScene(states, alive));
+      text('connection', alive ? '设备在线' : connectionFailed || hasConnected ? '设备未连接' : '设备正在连接');
+      text('headline', presentation.title); text('control-help', d.helper);
       const toggle = el('trial'); toggle.checked = d.intent; toggle.disabled = controlLock.active || !d.canSwitch;
       el('restore').disabled = controlLock.active || !d.canRestore;
       const confirmed = d.connected && settingsGeneration === generation && settingsData && settingsData.status === 'ready' ? settingsData.settings : null;
@@ -346,10 +434,10 @@
       if (!el('backdrop').hidden) showDetails();
       renderSettings();
     }
-    function disconnect() { generation++; if (source) source.close(); source = null; clearTimeout(reconnectTimer); lastEvent = 0; render(); }
+    function disconnect(failed = true) { if (failed) connectionFailed = true; generation++; if (source) source.close(); source = null; clearTimeout(reconnectTimer); lastEvent = 0; render(); }
     function connect() {
-      disconnect(); for (const id of Object.keys(states)) delete states[id]; for (const id of Object.keys(revisions)) delete revisions[id]; const current = generation; source = new EventSource('/events');
-      source.onopen = () => { if (current !== generation) return; lastEvent = Date.now(); retry = 1000; render(); readSettings().catch(() => {}); hydrate(current); };
+      disconnect(false); for (const id of Object.keys(states)) delete states[id]; for (const id of Object.keys(revisions)) delete revisions[id]; const current = generation; source = new EventSource('/events');
+      source.onopen = () => { if (current !== generation) return; lastEvent = Date.now(); connectionFailed = false; hasConnected = true; retry = 1000; render(); readSettings().catch(() => {}); hydrate(current); };
       const update = event => { if (current !== generation) return; lastEvent = Date.now(); try { setState(JSON.parse(event.data)); } catch (_) { render(); } };
       source.addEventListener('state', update); source.addEventListener('state_detail_all', update);
       source.addEventListener('ping', () => { if (current !== generation) return; lastEvent = Date.now(); render(); });

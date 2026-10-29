@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+- Remove the page subtitle, smooth brief unknown TV presentation for up to 5 seconds without changing control, and animate an illustrative girl between near and far positions. Disconnects, reconnection and explicit failures invalidate the presentation; reduced-motion uses stable poses.
+- Add simulated TV transition, sustained unknown and explicit failure scenarios to the local UI fixture.
+
 - Name the independent radar distance assistant **Guanju (观距)**.
 
 - Add paired English and Chinese documentation and language-switch links; the device web interface remains in Chinese.
