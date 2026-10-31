@@ -33,6 +33,8 @@ Simulated button routes `Pause 10 Minutes`, `Pause 30 Minutes` and `Resume Monit
 
 Browser checks should cover the device-derived home explanation and near/approach rules, explicit “恢复画面并停用” action, settings close/keep-editing/discard paths and initially collapsed advanced controls. Debug polls only while open and foregrounded through the shared serialized queue, cancels on close/background, backs off on 429 and creates no extra SSE connection. For guided calibration, turn automation off, then select Near, Far, Far (seated-still) and Normal (absent), recording 3–30 snapshots per step. It summarizes only and never applies settings. The simulated stillness step cannot establish real stationary-target detection.
 
+Run `node firmware/ui/viewport.browser.cjs` for the fixed-home regression; set `CHROME_PATH` to choose the browser. The script substitutes nonzero safe-area values in CSS and checks short, landscape and desktop viewports, scrolling, dialogs, slider input, reload and resize. This simulation does not validate a real iPhone or Safari.
+
 Optional real-browser script, run from the project root with Node-importable Playwright and Chromium at `/usr/bin/chromium`:
 
 ```sh
