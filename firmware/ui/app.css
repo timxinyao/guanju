@@ -23,14 +23,6 @@
 .scene{flex:1 1 180px;min-height:105px;max-height:225px;width:100%;height:auto;margin:8px auto 0}
 .near{margin:10px 0 16px}.rules{margin:16px 0}.footer{margin-top:auto;padding-top:10px}
 @media(max-height:700px){.footer{margin-top:10px}}
-/* All arcs grow from the TV cabinet centre (180,108); the clip keeps them below the screen. */
-.scan-wave{transform-box:view-box;transform-origin:0 0;opacity:0}
-.scan-wave path{vector-effect:non-scaling-stroke}
-.wave-one{transform:scale(2)}.wave-two{transform:scale(4.3)}.wave-three{transform:scale(6.5)}
-.scene[data-monitoring="true"] .scan-wave{animation:scan-out 3s linear infinite}
-.scene[data-monitoring="true"] .wave-two{animation-delay:-1s}.scene[data-monitoring="true"] .wave-three{animation-delay:-2s}
-@keyframes scan-out{0%{transform:scale(.45);opacity:0}15%{opacity:.7}72%{opacity:.65}100%{transform:scale(7.3);opacity:0}}
-@media(prefers-reduced-motion:reduce){.scene[data-monitoring="true"] .scan-wave{animation:none!important;opacity:.5}}
 /* The TV picture, heading and dot share one presentation-only state. */
 .summary h2{font-size:27px}
 .summary[data-tv="visible"]{--tv-color:#42654e}
@@ -69,5 +61,5 @@
 /* Compact landscape keeps the actions reachable when there is little height. */
 @media(max-height:480px) and (orientation:landscape){.app-shell{padding-top:calc(4px + env(safe-area-inset-top,0px));padding-bottom:calc(4px + env(safe-area-inset-bottom,0px))}.summary{margin-top:4px}.summary>p{margin-top:2px}.scene,.footer{display:none}.control-panel{min-height:60px;padding:8px 14px}.rules{margin:4px 0}.rules strong{font-size:18px;line-height:1.1}.rules span{font-size:12px}.pause-controls{margin:0}.restore button{min-height:44px}}
 
-/* Fresh radar frames animate the wave; no animation runs for stale data. */
-.scene .wave{opacity:0}.scene[data-monitoring="true"] .wave{animation:scene-wave 3s ease-in-out infinite}.scene .wave-two{animation-delay:.45s!important}.scene .wave-three{animation-delay:.9s!important}.scene .wave-four{animation-delay:1.35s!important}@keyframes scene-wave{0%,100%{opacity:.2}45%{opacity:.8}}@media(prefers-reduced-motion:reduce){.scene[data-monitoring="true"] .wave{animation:none;opacity:.55}}
+/* Three arcs expand from the cabinet only while the radar snapshot is fresh. */
+.scene .scene-wave{opacity:0;transform-box:view-box;transform-origin:0 0}.scene[data-monitoring="true"] .scene-wave{animation:scene-wave 3s linear infinite}.scene[data-monitoring="true"] .scene-wave-two{animation-delay:-1s}.scene[data-monitoring="true"] .scene-wave-three{animation-delay:-2s}@keyframes scene-wave{0%{transform:scale(.4);opacity:0}15%{opacity:.75}80%{opacity:.65}100%{transform:scale(8);opacity:0}}@media(prefers-reduced-motion:reduce){.scene[data-monitoring="true"] .scene-wave{animation:none;opacity:.55;transform:scale(2)}.scene[data-monitoring="true"] .scene-wave-two{transform:scale(4.5)}.scene[data-monitoring="true"] .scene-wave-three{transform:scale(7)}}

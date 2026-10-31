@@ -117,6 +117,22 @@
     }
     return { data, observedAt };
   }
+  // Snapshot session, revision and readiness bound the lifetime of any cached /settings value.
+  function createSettingsEvidence() {
+    let current = null, version = 0;
+    return {
+      observe(data) {
+        const next = { session: data.session_id, revision: data.config_revision, ready: data.health.settings_ready };
+        if (current && current.session === next.session && current.revision === next.revision && current.ready === next.ready) return false;
+        current = next; version++; return true;
+      },
+      matches: revision => !current || (current.ready && revision === current.revision),
+      session: () => current && current.session,
+      token: () => version,
+      invalidate() { version++; },
+      reset() { current = null; version++; }
+    };
+  }
   function diagnosticView(data, receivedAt, now) {
     const valid = !!data && data.schema_version === 1 && typeof data.session_id === 'string' &&
       ['sequence', 'uptime_ms', 'sample_sequence', 'sample_at_ms', 'config_revision', 'near_threshold_cm', 'release_threshold_cm', 'snooze_remaining_ms', 'events_dropped'].every(k => Number.isSafeInteger(data[k]) && data[k] >= 0) &&
@@ -158,6 +174,7 @@
     function advance(now) {
       const m = state.motion; if (!m) return;
       let t = now - m.start;
+      if (m.keepPose) { const progress = sceneClamp(t / m.travelMs, 0, 1), e = ease(progress); state.x = m.x + (m.toX - m.x) * e; state.y = m.y + (m.toY - m.y) * e; state.phase = progress < 1 ? 'shifting' : 'idle'; if (progress >= 1) state.motion = null; return; }
       if (t < m.releaseMs) { state.phase = 'releasing'; const k = 1 - ease(sceneClamp(t / m.releaseMs, 0, 1)); state.sit = m.sit * k; state.cling = m.cling * k; return; }
       state.sit = 0; state.cling = 0; t -= m.releaseMs;
       if (t < m.turnMs) { state.phase = 'turning'; return; } t -= m.turnMs;
@@ -178,7 +195,7 @@
       if (target.presence === 'unknown') { state.presence = 'unknown'; state.distanceCm = null; state.motion = null; state.phase = 'unknown'; state.direction = 'front'; if (state.opacity > 0) state.opacity = .18; return; }
       const outsideX = Number.isFinite(target.outsideX) ? Math.min(-60, target.outsideX) : -60;
       const x = target.presence === 'absent' ? outsideX : 201;
-      const y = cm === null ? state.y : sceneY(destPose === 'clinging' ? 50 : destPose === 'sitting' ? 300 : cm);
+      const y = cm === null ? state.y : sceneY(cm);
       state.presence = target.presence; state.distanceCm = cm; state.desiredPose = destPose;
       if (target.presence === 'absent' && state.opacity === 0) { state.motion = null; state.x = x; state.phase = 'absent'; state.direction = 'front'; return; }
       if (target.presence === 'present' && ((previous === 'absent' && previousPhase === 'absent') || (previous === 'unknown' && state.opacity === 0))) { state.x = outsideX; state.y = y; state.sit = 0; state.cling = 0; }
@@ -186,6 +203,11 @@
       if (old && previous === target.presence && Math.abs(old.toX - x) < .5 && Math.abs(old.toY - y) < .5 && old.pose === destPose) { state.opacity = 1; return; }
       const distance = Math.hypot(x - state.x, y - state.y);
       if (distance < .5 && pose() === destPose && !old && (destPose === 'standing' || Math.max(state.sit, state.cling) > .999)) { state.opacity = target.presence === 'present' ? 1 : 0; state.phase = target.presence === 'present' ? 'idle' : 'absent'; return; }
+      if (!old && previous === 'present' && destPose !== 'standing' && pose() === destPose && Math.max(state.sit, state.cling) > .999 && distance < 12) {
+        state.opacity = 1; state.direction = 'front'; state.phase = 'shifting';
+        state.motion = { x: state.x, y: state.y, toX: x, toY: y, start: now, travelMs: 350, pose: destPose, keepPose: true };
+        return;
+      }
       state.opacity = 1; state.direction = x < state.x ? 'left' : 'right';
       const releaseMs = 260 * Math.max(state.sit, state.cling), travelMs = distance < .5 ? 0 : sceneClamp(distance / 115 * 1000, 650, 2600);
       state.motion = { x: state.x, y: state.y, toX: x, toY: y, start: now, sit: state.sit, cling: state.cling, releaseMs, turnMs: travelMs ? 150 : 0, travelMs, poseMs: destPose === 'standing' ? 0 : 300, pose: destPose, progress: 0 };
@@ -336,7 +358,7 @@
       canSwitch: alive && intentKnown, canRestore: alive && intentKnown && active };
   }
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { sceneObservation, sceneFloorBounds, createDistanceMotion, IDS, derive, createTvPresentation, isAlive, acceptState, detailValue, supportsNativeSwitch, settingsCloseDecision, calibrationResult, updateDiagnosticsCache, diagnosticView, createDiagnosticsPoller, applyVersionedState, boundedRequest, readEntity, runExclusive, createRequestQueue, validateSettings, sameSettings, pollSettings };
+    module.exports = { createSettingsEvidence, sceneObservation, sceneFloorBounds, createDistanceMotion, IDS, derive, createTvPresentation, isAlive, acceptState, detailValue, supportsNativeSwitch, settingsCloseDecision, calibrationResult, updateDiagnosticsCache, diagnosticView, createDiagnosticsPoller, applyVersionedState, boundedRequest, readEntity, runExclusive, createRequestQueue, validateSettings, sameSettings, pollSettings };
     return;
   }
   const meta = (name, content, attr = 'name') => {
@@ -365,7 +387,7 @@
       <defs><linearGradient id="screen" x2="0" y2="1"><stop stop-color="#f7faf8"/><stop offset="1" stop-color="#e2ece5"/></linearGradient><clipPath id="floor"><path d="M201 104 L67 281 Q201 315 335 281 Z"/></clipPath></defs>
       <g id="scene-floor" clip-path="url(#floor)"><path id="scene-near-area" d="M50 102H352V195.2H50Z" fill="#f7deda"/><path id="scene-release-area" d="M50 195.2H352V203.04H50Z" fill="#f9eacb"/><path id="scene-far-area" d="M50 203.04H352V315H50Z" fill="#e5f1e7"/><path id="scene-boundaries" d="M50 195.2H352M50 203.04H352" stroke="#fff" stroke-width="1.5" opacity=".8"/></g>
       <path d="M201 104L67 281Q201 315 335 281Z" fill="none" stroke="#dce9df" stroke-width="1"/>
-      <g fill="none" stroke="#7ba388" stroke-width="1.7" stroke-linecap="round"><path class="wave" d="M166 132q35 20 70 0"/><path class="wave wave-two" d="M146 151q55 30 110 0"/><path class="wave wave-three" d="M120 184q81 45 162 0"/><path class="wave wave-four" d="M91 224q110 55 220 0"/></g>
+      <g clip-path="url(#floor)" fill="none" stroke="#7ba388" stroke-width="1.7" stroke-linecap="round"><g transform="translate(201 112)"><g class="scene-wave"><path d="M-18 7 Q0 27 18 7" vector-effect="non-scaling-stroke"/></g><g class="scene-wave scene-wave-two"><path d="M-18 7 Q0 27 18 7" vector-effect="non-scaling-stroke"/></g><g class="scene-wave scene-wave-three"><path d="M-18 7 Q0 27 18 7" vector-effect="non-scaling-stroke"/></g></g></g>
       <rect x="125" y="10" width="152" height="77" rx="1" fill="url(#screen)" stroke="#536d61" stroke-width="1.4"/><path d="M127 55q27-20 51-9t51-3q23-13 46-7v49H127Z" fill="#dfeae3" opacity=".65"/><rect class="screen-overlay" x="127" y="12" width="148" height="73"/><path d="M198 87v5m6-5v5m-23 3 20-3 20 3" fill="none" stroke="#536d61" stroke-width="2" stroke-linecap="round"/><rect x="115" y="95" width="172" height="18" rx="1" fill="#f8fbf9" stroke="#6d8379"/><path d="M158 96v16m86-16v16m-125 1-2 5m165-5 2 5" stroke="#6d8379" fill="none"/>
       <g stroke="#536d61" stroke-width="1.1" fill="#f9fcfa"><rect x="139" y="263" width="124" height="32" rx="8"/><path d="M139 275v-3q0-10 10-10h43q9 0 9 9 0-9 9-9h43q10 0 10 10v3"/><rect x="127" y="271" width="12" height="33" rx="6"/><rect x="263" y="271" width="12" height="33" rx="6"/><rect x="137" y="274" width="128" height="31" rx="4"/><path d="M141 305l-1 7h4l2-7m110 0 2 7h4l-1-7"/></g>
       <g id="actor-position"><ellipse id="shadow" cx="0" cy="0" rx="17" ry="4" fill="#486551" opacity=".16"/><g id="actor-opacity"><g id="actor-facing"><g id="actor-bob" stroke="#536d61" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">
@@ -442,7 +464,7 @@
     let previousFocus = null, diagnostics = null, diagnosticsAt = 0, diagnosticsError = '', diagnosticsCache = null;
     let calibrationStep = -1, calibrationRecording = false, calibrationSamples = [], calibrationLast = '', calibrationSession = '', calibrationResults = [];
     const calibrationSteps = [{ title: '站在希望提醒的近处', expected: 'near' }, { title: '退到正常观看位置', expected: 'far' }, { title: '在观看位置安静坐好', expected: 'far' }, { title: '离开雷达覆盖区域', expected: 'absent' }];
-    const tvPresentation = createTvPresentation(), distanceMotion = createDistanceMotion();
+    const tvPresentation = createTvPresentation(), distanceMotion = createDistanceMotion(), settingsEvidence = createSettingsEvidence();
     let sceneFrame = 0, presentationTimer = 0, presentationDeadline = null, connectionFailed = false, hasConnected = false;
     const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
     const text = (id, content) => { const node = el(id); if (node.textContent !== content) { node.textContent = content; if (node.animate && !matchMedia('(prefers-reduced-motion: reduce)').matches) node.animate([{ opacity: .45 }, { opacity: 1 }], { duration: 220, easing: 'ease-out' }); } };
@@ -450,7 +472,16 @@
     const request = (url, options = {}) => enqueue(() => boundedRequest(fetch, url, options), 0);
     const diagnosticsPoller = createDiagnosticsPoller({ enqueue, fetcher: fetch, onData: (data, requestedAt) => {
       if (!diagnosticView(data, 0, 0).valid) throw new Error('invalid diagnostics');
-      diagnosticsCache = updateDiagnosticsCache(diagnosticsCache, data, requestedAt); diagnostics = diagnosticsCache.data; diagnosticsAt = diagnosticsCache.observedAt; diagnosticsError = ''; collectCalibration(); render();
+      const previous = diagnosticsCache;
+      diagnosticsCache = updateDiagnosticsCache(previous, data, requestedAt); diagnostics = diagnosticsCache.data; diagnosticsAt = diagnosticsCache.observedAt; diagnosticsError = '';
+      const previousSession = settingsEvidence.session();
+      const changed = diagnosticsCache !== previous && settingsEvidence.observe(diagnostics);
+      if (changed) {
+        settingsGeneration = -1; settingsNotice = '';
+        if (dirty && ((previousSession && previousSession !== diagnostics.session_id) || draftRevision !== diagnostics.config_revision)) conflict = true;
+      }
+      collectCalibration(); render();
+      if (changed && diagnostics.health.settings_ready && !document.hidden && !settingsLock.active) readSettings().catch(() => {});
     }, onError: error => { diagnosticsError = error.status === 404 ? '当前固件不支持诊断，请更新固件。' : error.status === 429 ? '设备繁忙，正在减慢更新。' : '诊断暂不可用，正在重试。'; render(); } });
     function updateDiagnosticsPolling() { diagnosticsPoller.setActive(!document.hidden && isAlive(lastEvent, Date.now())); }
     function setState(data, expected = generation) { if (applyVersionedState(states, revisions, data, expected, generation)) render(); }
@@ -462,23 +493,23 @@
     }
     function syncSettings(data, epoch) {
       if (epoch !== generation || !validEnvelope(data)) throw new Error('invalid settings');
-      settingsData = data; settingsGeneration = epoch;
+      settingsData = data; settingsGeneration = !document.hidden && settingsEvidence.matches(data.revision) ? epoch : -1;
       if (dirty && draftRevision !== data.revision) conflict = true;
       if (!dirty && data.status !== 'applying') { draft = { ...data.settings }; draftRevision = data.revision; conflict = false; }
       render();
       return data;
     }
     function readSettings() {
-      if (settingsRead && settingsRead.epoch === generation && settingsRead.mutation === settingsMutation) return settingsRead.promise;
-      const epoch = generation, mutation = settingsMutation;
+      if (settingsRead && settingsRead.epoch === generation && settingsRead.mutation === settingsMutation && settingsRead.evidence === settingsEvidence.token()) return settingsRead.promise;
+      const epoch = generation, mutation = settingsMutation, evidence = settingsEvidence.token();
       const reading = (async () => {
         try {
-          const data = await enqueue(() => boundedRequest(fetch, '/settings', {}, true), 2, () => epoch === generation && mutation === settingsMutation);
-          if (epoch !== generation || mutation !== settingsMutation) throw new Error('stale response');
+          const data = await enqueue(() => boundedRequest(fetch, '/settings', {}, true), 2, () => epoch === generation && mutation === settingsMutation && evidence === settingsEvidence.token());
+          if (epoch !== generation || mutation !== settingsMutation || evidence !== settingsEvidence.token()) throw new Error('stale response');
           settingsNotice = '';
           return syncSettings(data, epoch);
         } catch (error) {
-          if (epoch === generation && mutation === settingsMutation) {
+          if (epoch === generation && mutation === settingsMutation && evidence === settingsEvidence.token()) {
             settingsGeneration = -1;
             settingsNotice = error.status === 404 ? '当前固件不支持参数设置，请更新固件。' : '无法读取设备参数，请刷新后重试。';
             render();
@@ -486,7 +517,7 @@
           throw error;
         }
       })();
-      const entry = { epoch, mutation, promise: reading };
+      const entry = { epoch, mutation, evidence, promise: reading };
       settingsRead = entry;
       reading.finally(() => { if (settingsRead === entry) settingsRead = null; }).catch(() => {});
       return reading;
@@ -502,7 +533,7 @@
       else if (!message) message = '参数已由设备确认。';
       text('settings-message', message);
       el('settings-reload').hidden = !conflict;
-      el('settings-apply').disabled = !dirty && current && current.status === 'ready';
+      el('settings-apply').disabled = !current || current.status !== 'ready' || !dirty;
       el('settings-fields').disabled = !draft || !alive || !current || current.status === 'applying' || settingsLock.active || conflict;
       if (!draft) return;
       el('distance').value = draft.distance_cm;
@@ -661,7 +692,7 @@
       if (!el('backdrop').hidden) { showDetails(); renderDiagnostics(); }
       renderSettings();
     }
-    function disconnect(failed = true) { diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; if (failed) connectionFailed = true; generation++; if (source) source.close(); source = null; clearTimeout(reconnectTimer); lastEvent = 0; render(); }
+    function disconnect(failed = true) { if (dirty) conflict = true; settingsNotice = ''; settingsEvidence.reset(); diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; if (failed) connectionFailed = true; generation++; if (source) source.close(); source = null; clearTimeout(reconnectTimer); lastEvent = 0; render(); }
     function connect() {
       disconnect(false); for (const id of Object.keys(states)) delete states[id]; for (const id of Object.keys(revisions)) delete revisions[id]; const current = generation; source = new EventSource('/events');
       source.onopen = () => { if (current !== generation) return; lastEvent = Date.now(); connectionFailed = false; hasConnected = true; retry = 1000; render(); readSettings().catch(() => {}); hydrate(current); };
@@ -745,7 +776,7 @@
       catch (_) { /* readSettings displays the failure */ }
     });
     async function submitSettings(defaults) {
-      if (!draft || conflict || settingsLock.active || !isAlive(lastEvent, Date.now())) return;
+      if (!draft || conflict || settingsLock.active || settingsGeneration !== generation || !settingsData || settingsData.status !== 'ready' || !isAlive(lastEvent, Date.now())) return;
       await runExclusive(settingsLock, async () => {
         try {
           const current = await readSettings();
@@ -811,8 +842,8 @@
         else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
       }
     });
-    document.addEventListener('visibilitychange', () => { updateDiagnosticsPolling(); if (!document.hidden) refresh(); else { calibrationRecording = false; calibrationSamples = []; diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; render(); } });
-    window.addEventListener('pagehide', () => { diagnosticsPoller.setActive(false); diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; if (sceneFrame) cancelAnimationFrame(sceneFrame); sceneFrame = 0; distanceMotion.update({ presence: 'unknown' }, Date.now(), reducedMotion.matches); });
+    document.addEventListener('visibilitychange', () => { updateDiagnosticsPolling(); if (!document.hidden) refresh(); else { settingsEvidence.invalidate(); settingsGeneration = -1; settingsNotice = ''; calibrationRecording = false; calibrationSamples = []; diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; render(); } });
+    window.addEventListener('pagehide', () => { settingsEvidence.invalidate(); settingsGeneration = -1; settingsNotice = ''; diagnosticsPoller.setActive(false); diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; if (sceneFrame) cancelAnimationFrame(sceneFrame); sceneFrame = 0; distanceMotion.update({ presence: 'unknown' }, Date.now(), reducedMotion.matches); });
     window.addEventListener('beforeunload', event => { if (dirty || settingsLock.active) { event.preventDefault(); event.returnValue = ''; } });
     window.addEventListener('pageshow', e => { if (e.persisted) refresh(); });
     setInterval(() => { if (!document.hidden && !el('settings-backdrop').hidden && !settingsLock.active && isAlive(lastEvent, Date.now())) readSettings().catch(() => {}); }, 3000);
