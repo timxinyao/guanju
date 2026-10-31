@@ -4,11 +4,13 @@
 
 ## Unreleased
 
+- Drive the illustrated character and threshold bands from fresh shared diagnostic snapshots; stale or unknown measurements fade the last position without implying absence.
+
 - Keep the home view fixed within the viewport while preserving internal settings and debug panel scrolling.
 
 - Refine the phone UI while retaining the forest-green illustrated scene: plain current-state explanation, explicit restore-and-disable, secondary pause controls, settings Close with draft protection and collapsed advanced controls.
 - Add temporary 10/30-minute snooze with health-gated resumption, external-picture-restoration courtesy, a provisional 20 cm release margin, fresh supporting observations and bounded parameter-audit deadlines. Unknown/stale observations never imply absence.
-- Add bounded optional diagnostics, a 12-event RAM history, foreground-only serialized polling with cancellation/backoff, and local four-step guided observation that never applies settings. Distances remain approximate; snapshots are not lossless radar recording. No new hardware or real-iPhone validation is implied.
+- Add bounded diagnostics, a 12-event RAM history, foreground-only serialized polling with cancellation/backoff, and local four-step guided observation that never applies settings. Distances remain approximate; snapshots are not lossless radar recording. No new hardware or real-iPhone validation is implied.
 
 - Remove the page subtitle, smooth brief unknown TV presentation for up to 5 seconds without changing control, and animate an illustrative girl between near and far positions. Disconnects, reconnection and explicit failures invalidate the presentation; reduced-motion uses stable poses.
 - Add simulated TV transition, sustained unknown and explicit failure scenarios to the local UI fixture.

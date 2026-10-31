@@ -2,7 +2,7 @@
 
 # Local diagnostics and agent collection
 
-Open **设备详情** (device details) to inspect approximate distances and guided calibration. Closing details or backgrounding the page stops its extra diagnostic polling. Calibration is advice only: it does not identify children, map positions, automatically apply settings or establish TV/RF reliability.
+Open **设备详情** (device details) to inspect approximate distances and guided calibration. Home and details share diagnostic polling. Closing details leaves home polling active; backgrounding the page or disconnecting stops it. Calibration is advice only: it does not identify children, map positions, automatically apply settings or establish TV/RF reliability.
 
 `GET /diagnostics` is an optional, **read-only, unauthenticated trusted-LAN endpoint**. It contains no Wi-Fi password, TV PSK or raw UART bytes. It nevertheless describes activity in the room: collect with the household's permission, keep files local and redact them before sharing. Do not expose the board to the internet or add port forwarding. This feature does not change existing OTA credentials or security settings; see [maintenance](maintenance.md).
 

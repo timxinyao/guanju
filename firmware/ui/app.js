@@ -117,6 +117,23 @@
     }
     return { data, observedAt };
   }
+  // Snapshot session, revision and readiness bound the lifetime of any cached /settings value.
+  function createSettingsEvidence() {
+    let current = null, version = 0;
+    return {
+      observe(data) {
+        const next = { session: data.session_id, revision: data.config_revision, ready: data.health.settings_ready };
+        if (current && current.session === next.session && current.revision === next.revision && current.ready === next.ready) return false;
+        current = next; version++; return true;
+      },
+      matches: revision => !current || (current.ready && revision === current.revision),
+      sameRevision: revision => !!current && revision === current.revision,
+      session: () => current && current.session,
+      token: () => version,
+      invalidate() { version++; },
+      reset() { current = null; version++; }
+    };
+  }
   function diagnosticView(data, receivedAt, now) {
     const valid = !!data && data.schema_version === 1 && typeof data.session_id === 'string' &&
       ['sequence', 'uptime_ms', 'sample_sequence', 'sample_at_ms', 'config_revision', 'near_threshold_cm', 'release_threshold_cm', 'snooze_remaining_ms', 'events_dropped'].every(k => Number.isSafeInteger(data[k]) && data[k] >= 0) &&
@@ -136,13 +153,68 @@
     return { valid, fresh, radarCurrent, sampleFresh, nearest, moving, still, distance: format(nearest), movingText: format(moving), stillText: format(still),
       zone: radarCurrent ? ({ near: '近处有目标', far: '远处有目标', absent: '未检测到目标', unknown: '测距状态不明确', unavailable: '雷达不可用' }[data.zone] || '未知') : '等待新鲜数据' };
   }
-  function deriveScene(states, alive) {
-    if (!alive || !on(value(states, IDS.radar))) return 'unknown';
-    const scene = value(states, IDS.scene);
-    return scene === 'Near' ? 'near' : scene === 'Far' ? 'far' : scene === 'Absent' ? 'absent' : 'unknown';
+  // A scene target comes from one accepted diagnostic snapshot, never independent SSE sensors.
+  function sceneObservation(data, observedAt, now, connected) {
+    if (!connected) return { presence: 'unknown' };
+    const view = diagnosticView(data, observedAt, now);
+    if (!view.radarCurrent || !data.health.measurement_known) return { presence: 'unknown' };
+    if (data.zone === 'absent') return { presence: 'absent' };
+    if (view.sampleFresh && view.nearest !== null) return { presence: 'present', distanceCm: view.nearest };
+    return { presence: 'unknown' };
   }
-  function deriveScanning(states, alive) {
-    return alive && on(value(states, IDS.radar));
+  const sceneClamp = (v, min, max) => Math.min(max, Math.max(min, v));
+  const sceneY = cm => 156 + (sceneClamp(cm, 50, 300) - 50) / 250 * 98;
+  function sceneFloorBounds(near, release) {
+    if (!Number.isFinite(near) || !Number.isFinite(release) || near < 50 || near > 300 || release < near || release > 320) return null;
+    return { near: sceneY(near), release: sceneY(release) };
+  }
+  function createDistanceMotion() {
+    const state = { presence: 'unknown', distanceCm: null, x: -60, y: 254, opacity: 0, phase: 'unknown', direction: 'front', sit: 0, cling: 0, desiredPose: 'standing', motion: null };
+    const ease = n => n * n * (3 - 2 * n);
+    const pose = () => state.sit > .001 ? 'sitting' : state.cling > .001 ? 'clinging' : 'standing';
+    function advance(now) {
+      const m = state.motion; if (!m) return;
+      let t = now - m.start;
+      if (m.keepPose) { const progress = sceneClamp(t / m.travelMs, 0, 1), e = ease(progress); state.x = m.x + (m.toX - m.x) * e; state.y = m.y + (m.toY - m.y) * e; state.phase = progress < 1 ? 'shifting' : 'idle'; if (progress >= 1) state.motion = null; return; }
+      if (t < m.releaseMs) { state.phase = 'releasing'; const k = 1 - ease(sceneClamp(t / m.releaseMs, 0, 1)); state.sit = m.sit * k; state.cling = m.cling * k; return; }
+      state.sit = 0; state.cling = 0; t -= m.releaseMs;
+      if (t < m.turnMs) { state.phase = 'turning'; return; } t -= m.turnMs;
+      if (t < m.travelMs) { state.phase = 'moving'; m.progress = sceneClamp(t / m.travelMs, 0, 1); const e = ease(m.progress); state.x = m.x + (m.toX - m.x) * e; state.y = m.y + (m.toY - m.y) * e; return; }
+      state.x = m.toX; state.y = m.toY; t -= m.travelMs;
+      if (t < m.poseMs) { state.phase = 'posing'; const k = ease(sceneClamp(t / m.poseMs, 0, 1)); state.sit = m.pose === 'sitting' ? k : 0; state.cling = m.pose === 'clinging' ? k : 0; state.direction = 'front'; return; }
+      state.sit = m.pose === 'sitting' ? 1 : 0; state.cling = m.pose === 'clinging' ? 1 : 0; state.motion = null; state.direction = 'front'; state.phase = state.presence === 'absent' ? 'absent' : 'idle'; if (state.presence === 'absent') state.opacity = 0;
+    }
+    function update(target, now, reduced) {
+      advance(now);
+      const previous = state.presence, previousPhase = state.phase, old = state.motion;
+      const cm = target.presence === 'present' ? sceneClamp(target.distanceCm, 50, 300) : null;
+      let destPose = 'standing';
+      if (cm !== null) {
+        if ((state.desiredPose === 'sitting' && cm >= 260) || cm >= 280) destPose = 'sitting';
+        else if ((state.desiredPose === 'clinging' && cm <= 70) || cm <= 60) destPose = 'clinging';
+      }
+      if (target.presence === 'unknown') { state.presence = 'unknown'; state.distanceCm = null; state.motion = null; state.phase = 'unknown'; state.direction = 'front'; if (state.opacity > 0) state.opacity = .18; return; }
+      const outsideX = Number.isFinite(target.outsideX) ? Math.min(-60, target.outsideX) : -60;
+      const x = target.presence === 'absent' ? outsideX : 201;
+      const y = cm === null ? state.y : sceneY(cm);
+      state.presence = target.presence; state.distanceCm = cm; state.desiredPose = destPose;
+      if (target.presence === 'absent' && state.opacity === 0) { state.motion = null; state.x = x; state.phase = 'absent'; state.direction = 'front'; return; }
+      if (target.presence === 'present' && ((previous === 'absent' && previousPhase === 'absent') || (previous === 'unknown' && state.opacity === 0))) { state.x = outsideX; state.y = y; state.sit = 0; state.cling = 0; }
+      if (reduced) { state.motion = null; state.x = x; state.y = y; state.sit = destPose === 'sitting' ? 1 : 0; state.cling = destPose === 'clinging' ? 1 : 0; state.opacity = target.presence === 'present' ? 1 : 0; state.phase = target.presence === 'present' ? 'idle' : 'absent'; state.direction = 'front'; return; }
+      if (old && previous === target.presence && Math.abs(old.toX - x) < .5 && Math.abs(old.toY - y) < .5 && old.pose === destPose) { state.opacity = 1; return; }
+      const distance = Math.hypot(x - state.x, y - state.y);
+      if (distance < .5 && pose() === destPose && !old && (destPose === 'standing' || Math.max(state.sit, state.cling) > .999)) { state.opacity = target.presence === 'present' ? 1 : 0; state.phase = target.presence === 'present' ? 'idle' : 'absent'; return; }
+      if (!old && previous === 'present' && destPose !== 'standing' && pose() === destPose && Math.max(state.sit, state.cling) > .999 && distance < 12) {
+        state.opacity = 1; state.direction = 'front'; state.phase = 'shifting';
+        state.motion = { x: state.x, y: state.y, toX: x, toY: y, start: now, travelMs: 350, pose: destPose, keepPose: true };
+        return;
+      }
+      state.opacity = 1; state.direction = x < state.x ? 'left' : 'right';
+      const releaseMs = 260 * Math.max(state.sit, state.cling), travelMs = distance < .5 ? 0 : sceneClamp(distance / 115 * 1000, 650, 2600);
+      state.motion = { x: state.x, y: state.y, toX: x, toY: y, start: now, sit: state.sit, cling: state.cling, releaseMs, turnMs: travelMs ? 150 : 0, travelMs, poseMs: destPose === 'standing' ? 0 : 300, pose: destPose, progress: 0 };
+      state.phase = releaseMs ? 'releasing' : travelMs ? 'turning' : 'posing';
+    }
+    return { update, advance, read: () => ({ ...state, pose: pose(), poseProgress: Math.max(state.sit, state.cling) }) };
   }
   // Presentation is deliberately separate from raw device state and control permissions.
   function createTvPresentation() {
@@ -173,24 +245,6 @@
       const result = now - unknownSince < 5000 ? (confirmed || 'connecting') : 'unknown';
       return { kind: result, title: titles[result], ...(result !== 'unknown' ? { deadline: unknownSince + 5000 } : {}) };
     } };
-  }
-  function createSceneMotion() {
-    let target = null, token = 0, running = false;
-    const visible = state => state === 'near' || state === 'far';
-    return {
-      update(next) {
-        if (next === target) return { target, animate: false, token, running };
-        const animate = visible(target) && visible(next);
-        target = next; running = animate; token++;
-        return { target, animate, token, running };
-      },
-      finish(completed) { if (completed !== token || !running) return false; running = false; return true; },
-      stop() { token++; running = false; }
-    };
-  }
-  function sceneTrajectory(x, y, target) {
-    const destination = target === 'far' ? 52 : 0;
-    return [{ x, y }, { x: x / 2 + 13, y: (y + destination) / 2 }, { x: 0, y: destination }];
   }
   const SETTINGS_KEYS = ['distance_cm', 'near_ms', 'radar_timeout_s', 'clear_ms', 'sensitivity'];
   const DEFAULT_SETTINGS = { distance_cm: 150, near_ms: 3000, radar_timeout_s: 1, clear_ms: 1000, sensitivity: 'standard' };
@@ -305,7 +359,7 @@
       canSwitch: alive && intentKnown, canRestore: alive && intentKnown && active };
   }
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { IDS, derive, deriveScene, deriveScanning, createTvPresentation, createSceneMotion, sceneTrajectory, isAlive, acceptState, detailValue, supportsNativeSwitch, settingsCloseDecision, calibrationResult, updateDiagnosticsCache, diagnosticView, createDiagnosticsPoller, applyVersionedState, boundedRequest, readEntity, runExclusive, createRequestQueue, validateSettings, sameSettings, pollSettings };
+    module.exports = { createSettingsEvidence, sceneObservation, sceneFloorBounds, createDistanceMotion, IDS, derive, createTvPresentation, isAlive, acceptState, detailValue, supportsNativeSwitch, settingsCloseDecision, calibrationResult, updateDiagnosticsCache, diagnosticView, createDiagnosticsPoller, applyVersionedState, boundedRequest, readEntity, runExclusive, createRequestQueue, validateSettings, sameSettings, pollSettings };
     return;
   }
   const meta = (name, content, attr = 'name') => {
@@ -330,21 +384,32 @@
       </header>
       <section class="summary" aria-live="polite" data-tv="connecting"><h2><span class="dot" aria-hidden="true"></span><span id="headline">正在连接</span></h2><p id="scene-explanation">正在获取测距状态</p><span class="sr-only" id="connection">设备正在连接</span></section>
       <section class="scene" data-state="unknown" data-monitoring="false" data-tv="connecting" aria-label="雷达探测和电视沙发示意图">
-        <svg viewBox="62 0 236 234" role="img" aria-hidden="true"><defs><linearGradient id="screen" x2="0" y2="1"><stop stop-color="#f7faf8"/><stop offset="1" stop-color="#e2ece5"/></linearGradient><clipPath id="scan-clip"><rect x="10" y="111" width="340" height="113"/></clipPath></defs>
-          <ellipse cx="180" cy="210" rx="100" ry="13" fill="#f2f7f3"/>
-          <g clip-path="url(#scan-clip)" fill="none" stroke="#42654e" stroke-width="2.2"><g transform="translate(180 108)"><g class="scan-wave wave-one"><path d="M-14 6 Q0 25 14 6"/></g><g class="scan-wave wave-two"><path d="M-14 6 Q0 25 14 6"/></g><g class="scan-wave wave-three"><path d="M-14 6 Q0 25 14 6"/></g></g></g>
-          <rect x="104" y="8" width="152" height="77" rx="1" fill="url(#screen)" stroke="#536d61" stroke-width="1.4"/><g class="screen-landscape"><path d="M106 53q27-20 51-9t51-3q23-13 46-7v49H106Z" fill="#dfeae3" opacity=".65"/><path d="M106 59q26-10 51 3t50-5q27-13 47-10v36H106Z" fill="#d5e4d9" opacity=".6"/></g><rect class="screen-overlay" x="106" y="10" width="148" height="73"/><path d="M177 85v5m6-5v5m-23 3 20-3 20 3" fill="none" stroke="#536d61" stroke-width="2" stroke-linecap="round"/>
-          <rect x="94" y="93" width="172" height="18" rx="1" fill="#f8fbf9" stroke="#6d8379"/><path d="M137 94v16m86-16v16m-125 1-2 5m165-5 2 5" stroke="#6d8379" fill="none"/>
-          <g stroke="#536d61" stroke-width="1.1" fill="#f9fcfa"><rect x="118" y="177" width="124" height="32" rx="8"/><path d="M118 189v-3q0-10 10-10h43q9 0 9 9 0-9 9-9h43q10 0 10 10v3"/></g>
-          <g stroke="#536d61" stroke-width="1.1" fill="#f9fcfa"><rect x="106" y="185" width="12" height="33" rx="6"/><rect x="242" y="185" width="12" height="33" rx="6"/><rect x="116" y="188" width="128" height="31" rx="4"/><path d="M120 219l-1 7h4l2-7m110 0 2 7h4l-1-7"/></g>
-          <g class="scene-actor" aria-hidden="true"><g class="actor-body" stroke="#536d61" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
-            <g class="actor-leg leg-left"><path d="M176 145l-1 7m-2 1h5" fill="none" stroke-width="2"/></g><g class="actor-leg leg-right"><path d="M184 145l1 7m-1 1h5" fill="none" stroke-width="2"/></g>
-            <path class="seated-legs" d="M174 143q-5 2-4 6l5 2m11-8q5 2 4 6l-5 2m-12 0h4m6 0h4" fill="none" stroke-width="2"/>
-            <g class="actor-arm arm-left"><path d="M175 131l-5 7" fill="none" stroke-width="2.2"/></g><g class="actor-arm arm-right"><path d="M185 131l5 7" fill="none" stroke-width="2.2"/></g>
-            <path d="M175 128q5-2 10 0l5 17h-20Z" fill="#f3e4d3"/><path d="M174 144h12" fill="none" stroke="#a7bfa8"/>
-            <circle cx="180" cy="118" r="9" fill="#f8e8d8"/><path d="M171 118q-1-10 9-10t9 10q-3-1-5-5-4 5-13 5Z" fill="#748d78"/><path d="M171 114q-5-2-5 3 1 3 5 2m18-5q5-2 5 3-1 3-5 2" fill="#748d78"/><circle cx="177" cy="120" r=".7" fill="#536d61" stroke="none"/><circle cx="183" cy="120" r=".7" fill="#536d61" stroke="none"/><path d="M178 123q2 1 4 0" fill="none"/>
-          </g></g>
-        </svg>
+    <svg viewBox="0 0 402 330" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      <defs><linearGradient id="screen" x2="0" y2="1"><stop stop-color="#f7faf8"/><stop offset="1" stop-color="#e2ece5"/></linearGradient><clipPath id="floor"><path d="M201 104 L67 281 Q201 315 335 281 Z"/></clipPath></defs>
+      <g id="scene-floor" clip-path="url(#floor)"><path id="scene-near-area" d="M50 102H352V195.2H50Z" fill="#f7deda"/><path id="scene-release-area" d="M50 195.2H352V203.04H50Z" fill="#f9eacb"/><path id="scene-far-area" d="M50 203.04H352V315H50Z" fill="#e5f1e7"/><path id="scene-boundaries" d="M50 195.2H352M50 203.04H352" stroke="#fff" stroke-width="1.5" opacity=".8"/></g>
+      <path d="M201 104L67 281Q201 315 335 281Z" fill="none" stroke="#dce9df" stroke-width="1"/>
+      <g clip-path="url(#floor)" fill="none" stroke="#7ba388" stroke-width="1.7" stroke-linecap="round"><g transform="translate(201 112)"><g class="scene-wave"><path d="M-18 7 Q0 27 18 7" vector-effect="non-scaling-stroke"/></g><g class="scene-wave scene-wave-two"><path d="M-18 7 Q0 27 18 7" vector-effect="non-scaling-stroke"/></g><g class="scene-wave scene-wave-three"><path d="M-18 7 Q0 27 18 7" vector-effect="non-scaling-stroke"/></g></g></g>
+      <rect x="125" y="10" width="152" height="77" rx="1" fill="url(#screen)" stroke="#536d61" stroke-width="1.4"/><path d="M127 55q27-20 51-9t51-3q23-13 46-7v49H127Z" fill="#dfeae3" opacity=".65"/><rect class="screen-overlay" x="127" y="12" width="148" height="73"/><path d="M198 87v5m6-5v5m-23 3 20-3 20 3" fill="none" stroke="#536d61" stroke-width="2" stroke-linecap="round"/><rect x="115" y="95" width="172" height="18" rx="1" fill="#f8fbf9" stroke="#6d8379"/><path d="M158 96v16m86-16v16m-125 1-2 5m165-5 2 5" stroke="#6d8379" fill="none"/>
+      <g stroke="#536d61" stroke-width="1.1" fill="#f9fcfa"><rect x="139" y="263" width="124" height="32" rx="8"/><path d="M139 275v-3q0-10 10-10h43q9 0 9 9 0-9 9-9h43q10 0 10 10v3"/><rect x="127" y="271" width="12" height="33" rx="6"/><rect x="263" y="271" width="12" height="33" rx="6"/><rect x="137" y="274" width="128" height="31" rx="4"/><path d="M141 305l-1 7h4l2-7m110 0 2 7h4l-1-7"/></g>
+      <g id="actor-position"><ellipse id="shadow" cx="0" cy="0" rx="17" ry="4" fill="#486551" opacity=".16"/><g id="actor-opacity"><g id="actor-facing"><g id="actor-bob" stroke="#536d61" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">
+        <g id="leg-back"><path id="leg-back-line" d="M-4 -18 L-5 -7 L-8 -2" fill="none" stroke="#64776a" stroke-width="3.3"/><path id="leg-back-foot" d="M-8 -2 h-4" fill="none" stroke="#5c7163" stroke-width="2.7"/></g>
+        <g id="leg-front"><path id="leg-front-line" d="M4 -18 L5 -7 L8 -2" fill="none" stroke="#64776a" stroke-width="3.3"/><path id="leg-front-foot" d="M8 -2 h4" fill="none" stroke="#5c7163" stroke-width="2.7"/></g>
+        <g id="arm-back"><path id="arm-back-line" d="M-6 -38 Q-12 -33 -13 -25" fill="none" stroke="#d6b9a4" stroke-width="4"/></g>
+        <path id="dress" d="M-8 -40 Q0 -43 8 -40 L13 -19 Q0 -15 -13 -19Z" fill="#f2dfce"/><path d="M-12 -21 Q0 -18 12 -21" fill="none" stroke="#a9c0ab"/><path d="M-5 -38 Q0 -35 5 -38" fill="none" stroke="#cfb6a6" stroke-width=".9"/>
+        <g id="arm-front"><path id="arm-front-line" d="M7 -38 Q12 -33 14 -26" fill="none" stroke="#e7c8b3" stroke-width="4"/></g>
+        <g id="head">
+          <g id="hair-tails" fill="#19191d" stroke="#111115" stroke-width=".8" stroke-linejoin="round">
+            <g id="pigtail-left"><path d="M-9 -58 Q-12 -59 -14 -57 Q-16 -56 -15.5 -54 Q-15 -52.7 -13.4 -53.2 Q-10.8 -54 -9 -55.8 Z"/><path d="M-11.5 -57 Q-13.3 -57 -14.7 -55.4 M-11.8 -55.8 Q-13.1 -55.8 -14.1 -54.7" fill="none" stroke="#48484d" stroke-width=".8"/></g>
+            <g id="pigtail-right"><path d="M9 -58 Q12 -59 14 -57 Q16 -56 15.5 -54 Q15 -52.7 13.4 -53.2 Q10.8 -54 9 -55.8 Z"/><path d="M11.5 -57 Q13.3 -57 14.7 -55.4 M11.8 -55.8 Q13.1 -55.8 14.1 -54.7" fill="none" stroke="#48484d" stroke-width=".8"/></g>
+          </g>
+          <path id="rear-hair" d="M-10 -54 Q-10 -66 0 -66 Q10 -66 10 -54 L10 -50 Q9 -43.5 4 -43 Q2 -42.4 0 -43 Q-2 -42.4 -4 -43 Q-9 -43.5 -10 -50 Z" fill="#19191d" stroke="#111115"/>
+          <circle cx="-10.2" cy="-58" r="1.65" fill="#e88f82" stroke="none"/><circle cx="10.2" cy="-58" r="1.65" fill="#e88f82" stroke="none"/>
+          <path d="M-7 -59 Q-3 -64 3 -63 M-7 -49 Q0 -45 7 -49" fill="none" stroke="#49494e" stroke-width=".8" stroke-linecap="round" opacity=".9"/>
+        </g>
+      </g></g></g></g>
+      <!-- The sofa front hides the lower body at the seated depth. -->
+      <path d="M137 274h128v31H137Z" fill="#f9fcfa" stroke="#536d61" stroke-width="1.1"/>
+    </svg>
       </section>
       <section class="control-panel"><span class="tv-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1"/><path d="M9 20h6m-3-3v3"/></svg></span><div class="control-copy"><h3>自动息屏</h3><p id="control-help">等待设备状态</p></div><label class="switch-area"><input id="trial" type="checkbox" switch aria-label="自动息屏" disabled></label></section>
       <section class="rules" aria-label="自动息屏规则"><div><strong id="range">—</strong><span>近距范围</span></div><div><strong id="approach-time">—</strong><span>靠近确认</span></div></section>
@@ -396,21 +461,30 @@
     if (!supportsNativeSwitch(HTMLInputElement.prototype)) el('trial').classList.add('switch-fallback');
     const controlLock = { active: false }, refreshLock = { active: false }, settingsLock = { active: false }, recoveryLock = { active: false };
     let source = null, lastEvent = 0, reconnectTimer = 0, retry = 1000, generation = 0, toastTimer = 0;
-    let settingsData = null, settingsGeneration = -1, settingsRead = null, settingsMutation = 0, draft = null, draftRevision = null, dirty = false, conflict = false, settingsNotice = '';
+    let settingsData = null, settingsGeneration = -1, settingsResponseGeneration = -1, settingsResponseAt = 0, settingsRead = null, settingsMutation = 0, draft = null, draftRevision = null, dirty = false, conflict = false, settingsNotice = '';
     let previousFocus = null, diagnostics = null, diagnosticsAt = 0, diagnosticsError = '', diagnosticsCache = null;
     let calibrationStep = -1, calibrationRecording = false, calibrationSamples = [], calibrationLast = '', calibrationSession = '', calibrationResults = [];
     const calibrationSteps = [{ title: '站在希望提醒的近处', expected: 'near' }, { title: '退到正常观看位置', expected: 'far' }, { title: '在观看位置安静坐好', expected: 'far' }, { title: '离开雷达覆盖区域', expected: 'absent' }];
-    const tvPresentation = createTvPresentation(), sceneMotion = createSceneMotion();
-    let actorAnimation = null, presentationTimer = 0, presentationDeadline = null, connectionFailed = false, hasConnected = false;
+    const tvPresentation = createTvPresentation(), distanceMotion = createDistanceMotion(), settingsEvidence = createSettingsEvidence();
+    let sceneFrame = 0, presentationTimer = 0, presentationDeadline = null, connectionFailed = false, hasConnected = false;
     const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
     const text = (id, content) => { const node = el(id); if (node.textContent !== content) { node.textContent = content; if (node.animate && !matchMedia('(prefers-reduced-motion: reduce)').matches) node.animate([{ opacity: .45 }, { opacity: 1 }], { duration: 220, easing: 'ease-out' }); } };
     const apiPath = id => { const [domain, name] = id.split('/'); return '/' + domain + '/' + encodeURIComponent(name); };
     const request = (url, options = {}) => enqueue(() => boundedRequest(fetch, url, options), 0);
     const diagnosticsPoller = createDiagnosticsPoller({ enqueue, fetcher: fetch, onData: (data, requestedAt) => {
       if (!diagnosticView(data, 0, 0).valid) throw new Error('invalid diagnostics');
-      diagnosticsCache = updateDiagnosticsCache(diagnosticsCache, data, requestedAt); diagnostics = diagnosticsCache.data; diagnosticsAt = diagnosticsCache.observedAt; diagnosticsError = ''; collectCalibration(); renderDiagnostics();
-    }, onError: error => { diagnostics = null; diagnosticsError = error.status === 404 ? '当前固件不支持诊断，请更新固件。' : error.status === 429 ? '设备繁忙，正在减慢更新。' : '诊断暂不可用，正在重试。'; renderDiagnostics(); } });
-    function updateDiagnosticsPolling() { diagnosticsPoller.setActive(!el('backdrop').hidden && !document.hidden && isAlive(lastEvent, Date.now())); }
+      const previous = diagnosticsCache;
+      diagnosticsCache = updateDiagnosticsCache(previous, data, requestedAt); diagnostics = diagnosticsCache.data; diagnosticsAt = diagnosticsCache.observedAt; diagnosticsError = '';
+      const previousSession = settingsEvidence.session();
+      const changed = diagnosticsCache !== previous && settingsEvidence.observe(diagnostics);
+      if (changed) {
+        settingsGeneration = -1; settingsResponseGeneration = -1; settingsNotice = '';
+        if (dirty && ((previousSession && previousSession !== diagnostics.session_id) || draftRevision !== diagnostics.config_revision)) conflict = true;
+      }
+      collectCalibration(); render();
+      if (changed && !document.hidden && !settingsLock.active) readSettings().catch(() => {});
+    }, onError: error => { diagnosticsError = error.status === 404 ? '当前固件不支持诊断，请更新固件。' : error.status === 429 ? '设备繁忙，正在减慢更新。' : '诊断暂不可用，正在重试。'; render(); } });
+    function updateDiagnosticsPolling() { diagnosticsPoller.setActive(!document.hidden && isAlive(lastEvent, Date.now())); }
     function setState(data, expected = generation) { if (applyVersionedState(states, revisions, data, expected, generation)) render(); }
     async function get(id, expected = generation) { const data = await enqueue(() => readEntity(fetch, apiPath(id), id, states, revisions, () => generation, expected), CORE.includes(id) || id === IDS.scene ? 1 : 3, () => expected === generation); render(); return data; }
     function notify(message) { const box = el('toast'); box.textContent = message; box.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { box.hidden = true; }, 3500); }
@@ -420,37 +494,46 @@
     }
     function syncSettings(data, epoch) {
       if (epoch !== generation || !validEnvelope(data)) throw new Error('invalid settings');
-      settingsData = data; settingsGeneration = epoch;
+      settingsData = data; settingsGeneration = !document.hidden && data.status !== 'error' && settingsEvidence.matches(data.revision) ? epoch : -1;
+      settingsResponseGeneration = !document.hidden && data.status === 'error' && settingsEvidence.sameRevision(data.revision) ? epoch : -1; settingsResponseAt = Date.now();
       if (dirty && draftRevision !== data.revision) conflict = true;
       if (!dirty && data.status !== 'applying') { draft = { ...data.settings }; draftRevision = data.revision; conflict = false; }
       render();
       return data;
     }
     function readSettings() {
-      if (settingsRead && settingsRead.epoch === generation && settingsRead.mutation === settingsMutation) return settingsRead.promise;
-      const epoch = generation, mutation = settingsMutation;
+      if (settingsRead && settingsRead.epoch === generation && settingsRead.mutation === settingsMutation && settingsRead.evidence === settingsEvidence.token()) return settingsRead.promise;
+      const epoch = generation, mutation = settingsMutation, evidence = settingsEvidence.token();
       const reading = (async () => {
         try {
-          const data = await enqueue(() => boundedRequest(fetch, '/settings', {}, true), 2, () => epoch === generation && mutation === settingsMutation);
-          if (epoch !== generation || mutation !== settingsMutation) throw new Error('stale response');
+          const data = await enqueue(() => boundedRequest(fetch, '/settings', {}, true), 2, () => epoch === generation && mutation === settingsMutation && evidence === settingsEvidence.token());
+          if (epoch !== generation || mutation !== settingsMutation || evidence !== settingsEvidence.token()) throw new Error('stale response');
           settingsNotice = '';
           return syncSettings(data, epoch);
         } catch (error) {
-          if (epoch === generation && mutation === settingsMutation) {
-            settingsGeneration = -1;
+          if (epoch === generation && mutation === settingsMutation && evidence === settingsEvidence.token()) {
+            settingsGeneration = -1; settingsResponseGeneration = -1;
             settingsNotice = error.status === 404 ? '当前固件不支持参数设置，请更新固件。' : '无法读取设备参数，请刷新后重试。';
             render();
           }
           throw error;
         }
       })();
-      const entry = { epoch, mutation, promise: reading };
+      const entry = { epoch, mutation, evidence, promise: reading };
       settingsRead = entry;
       reading.finally(() => { if (settingsRead === entry) settingsRead = null; }).catch(() => {});
       return reading;
     }
+    // An Error envelope can authorize retry only while its diagnostic session and revision are current.
+    // It must never make the saved settings a verified home-display fallback.
+    function currentErrorResponse(now = Date.now()) {
+      const view = diagnosticView(diagnostics, diagnosticsAt, now);
+      return !!settingsData && settingsData.status === 'error' && settingsResponseGeneration === generation &&
+        !document.hidden && isAlive(lastEvent, now) && now >= settingsResponseAt && now - settingsResponseAt <= 3500 &&
+        view.fresh && !diagnostics.health.settings_ready && settingsEvidence.sameRevision(settingsData.revision);
+    }
     function renderSettings() {
-      const alive = isAlive(lastEvent, Date.now()), current = settingsGeneration === generation && settingsData;
+      const alive = isAlive(lastEvent, Date.now()), current = (settingsGeneration === generation || currentErrorResponse()) && settingsData;
       let message = settingsNotice;
       if (!message && conflict) message = '设备参数已改变。重新加载将丢弃未应用的修改。';
       else if (!message && current && current.status === 'applying') message = '正在应用并验证参数，监测暂时暂停。';
@@ -460,7 +543,7 @@
       else if (!message) message = '参数已由设备确认。';
       text('settings-message', message);
       el('settings-reload').hidden = !conflict;
-      el('settings-apply').disabled = !dirty && current && current.status === 'ready';
+      el('settings-apply').disabled = !current || !['ready', 'error'].includes(current.status) || !dirty;
       el('settings-fields').disabled = !draft || !alive || !current || current.status === 'applying' || settingsLock.active || conflict;
       if (!draft) return;
       el('distance').value = draft.distance_cm;
@@ -542,32 +625,52 @@
       renderCalibration();
     });
     el('calibration-cancel').addEventListener('click', () => { calibrationStep = -1; calibrationRecording = false; calibrationSamples = []; text('calibration-instruction', '观察已结束，已记录的结果保留在此页。'); renderCalibration(); });
-    reducedMotion.addEventListener('change', event => {
-      if (!event.matches) return;
-      sceneMotion.stop();
-      if (actorAnimation) { actorAnimation.cancel(); actorAnimation = null; }
-      app.querySelector('.scene').classList.remove('running');
-    });
-    function updateActor(target) {
-      const scene = app.querySelector('.scene'), actor = scene.querySelector('.scene-actor');
-      const move = sceneMotion.update(target);
-      if (scene.dataset.state === target) return;
-      // Capture the interpolated position before cancelling an obsolete trip.
-      const current = getComputedStyle(actor).transform;
-      if (actorAnimation) { actorAnimation.cancel(); actorAnimation = null; }
-      scene.classList.remove('running');
-      scene.dataset.state = target;
-      if (!move.animate || reducedMotion.matches || !actor.animate) { sceneMotion.stop(); return; }
-      const matrix = current === 'none' ? { e: 0, f: 0 } : new DOMMatrixReadOnly(current);
-      const points = sceneTrajectory(matrix.e, matrix.f, target);
-      actorAnimation = actor.animate(points.map(point => ({ transform: `translate(${point.x}px, ${point.y}px)` })),
-        { duration: 800, easing: 'ease-in-out' });
-      scene.classList.add('running');
-      actorAnimation.onfinish = () => {
-        if (!sceneMotion.finish(move.token)) return;
-        actorAnimation = null; scene.classList.remove('running');
-      };
+    function paintScene(now) {
+      distanceMotion.advance(now); const state = distanceMotion.read(), node = id => el(id);
+      node('actor-position').setAttribute('transform', `translate(${state.x} ${state.y})`);
+      node('actor-opacity').setAttribute('opacity', state.opacity);
+      node('shadow').setAttribute('opacity', state.opacity * .16 * (1 - state.sit));
+      const moving = state.phase === 'moving', m = state.motion;
+      const envelope = moving && m ? Math.max(0, Math.min(1, m.progress * 6, (1 - m.progress) * 6)) : 0;
+      const gait = moving ? Math.sin((now - m.start - m.releaseMs - m.turnMs) * .018) : 0, swing = gait * 27 * envelope;
+      const direction = state.direction === 'left' ? -1 : 1, sideways = moving || state.phase === 'turning';
+      node('leg-back').setAttribute('transform', `rotate(${swing} -4 -18)`); node('leg-front').setAttribute('transform', `rotate(${-swing} 4 -18)`);
+      node('arm-back').setAttribute('transform', `rotate(${-swing * .75} -6 -38)`); node('arm-front').setAttribute('transform', `rotate(${swing * .75} 7 -38)`);
+      const v = (a, b) => a + (b - a) * state.sit, h = (a, b) => a + (b - a) * state.cling;
+      node('leg-back-line').setAttribute('d', `M-4 -18 L${v(-5,-13)} ${v(-7,-16)} L${v(-8,-13)} ${v(-2,-3)}`);
+      node('leg-back-foot').setAttribute('d', `M${v(-8,-13)} ${v(-2,-3)} h-4`);
+      node('leg-front-line').setAttribute('d', `M4 -18 L${v(5,13)} ${v(-7,-16)} L${v(8,13)} ${v(-2,-3)}`);
+      node('leg-front-foot').setAttribute('d', `M${v(8,13)} ${v(-2,-3)} h4`);
+      node('arm-back-line').setAttribute('d', `M-6 -38 Q${h(-12,-19)} ${h(-33,-50)} ${h(-13,-22)} ${h(-25,-61)}`);
+      node('arm-front-line').setAttribute('d', `M7 -38 Q${h(12,19)} ${h(-33,-50)} ${h(14,22)} ${h(-26,-61)}`);
+      node('dress').setAttribute('d', `M${h(-8,-6)} -40 Q${h(0,2)} -43 ${h(8,10)} -40 L13 -19 Q0 -15 -13 -19Z`);
+      const bob = moving ? Math.abs(gait) * 1.8 * envelope : 0, lean = moving ? direction * 5 * envelope : 0;
+      node('actor-bob').setAttribute('transform', `translate(0 ${state.sit * 38 - bob}) rotate(${lean} 0 -18)`);
+      node('head').setAttribute('transform', sideways ? `rotate(${direction * 4} 0 -54)` : `translate(${state.cling * 2} 0)`);
+      node('pigtail-left').setAttribute('transform', `rotate(${gait * 4 * envelope} -10 -58)`);
+      node('pigtail-right').setAttribute('transform', `rotate(${-gait * 4 * envelope} 10 -58)`);
+      node('dress').setAttribute('transform', `rotate(${-gait * 2 * envelope} 0 -39)`);
+      app.querySelector('.scene').dataset.state = state.presence;
+      sceneFrame = 0;
+      if (state.motion && !document.hidden) sceneFrame = requestAnimationFrame(() => paintScene(Date.now()));
     }
+    function updateActor(target, now) {
+      const svg = app.querySelector('.scene svg'), matrix = svg.getScreenCTM();
+      if (matrix && Math.abs(matrix.a * matrix.d - matrix.b * matrix.c) > 1e-8) target = { ...target, outsideX: new DOMPoint(-30, 0).matrixTransform(matrix.inverse()).x };
+      distanceMotion.update(target, now, reducedMotion.matches);
+      if (sceneFrame) cancelAnimationFrame(sceneFrame);
+      sceneFrame = 0; paintScene(now);
+    }
+    function updateFloor(bounds) {
+      el('scene-floor').style.visibility = bounds ? 'visible' : 'hidden';
+      if (!bounds) return;
+      const near = bounds.near, release = bounds.release;
+      el('scene-near-area').setAttribute('d', `M50 102H352V${near}H50Z`);
+      el('scene-release-area').setAttribute('d', `M50 ${near}H352V${release}H50Z`);
+      el('scene-far-area').setAttribute('d', `M50 ${release}H352V315H50Z`);
+      el('scene-boundaries').setAttribute('d', `M50 ${near}H352M50 ${release}H352`);
+    }
+    reducedMotion.addEventListener('change', () => render());
     function render() {
       const now = Date.now(), alive = isAlive(lastEvent, now), d = derive(states, alive);
       const presentation = tvPresentation.update(states, alive, generation, now, !connectionFailed && !hasConnected);
@@ -578,8 +681,9 @@
       const scene = app.querySelector('.scene');
       scene.dataset.tv = presentation.kind;
       app.querySelector('.summary').dataset.tv = presentation.kind;
-      scene.dataset.monitoring = String(deriveScanning(states, alive));
-      updateActor(deriveScene(states, alive));
+      const view = diagnosticView(diagnostics, diagnosticsAt, now);
+      scene.dataset.monitoring = String(alive && view.radarCurrent);
+      updateActor(sceneObservation(diagnostics, diagnosticsAt, now, alive && !document.hidden), now);
       text('connection', alive ? '设备在线' : connectionFailed || hasConnected ? '设备未连接' : '设备正在连接');
       text('headline', presentation.title); text('scene-explanation', d.zoneTitle); text('control-help', d.helper);
       const toggle = el('trial'); toggle.checked = d.intent; toggle.disabled = controlLock.active || !d.canSwitch;
@@ -588,13 +692,17 @@
       el('pause-10').disabled = el('pause-30').disabled = controlLock.active || !d.canSwitch || !d.intent;
       el('resume').hidden = !paused; el('resume').disabled = controlLock.active || !d.canSwitch || !d.intent;
       const confirmed = d.connected && settingsGeneration === generation && settingsData && settingsData.status === 'ready' ? settingsData.settings : null;
-      text('range', confirmed ? (confirmed.distance_cm / 100).toFixed(1) + ' 米' : '—');
+      const diagnosticBounds = view.fresh && diagnostics.health.settings_ready ? sceneFloorBounds(diagnostics.near_threshold_cm, diagnostics.release_threshold_cm) : null;
+      const bounds = view.fresh ? diagnosticBounds : confirmed ? sceneFloorBounds(confirmed.distance_cm, confirmed.distance_cm + 20) : null;
+      updateFloor(bounds);
+      const shownRange = diagnosticBounds ? diagnostics.near_threshold_cm : !view.fresh && confirmed ? confirmed.distance_cm : null;
+      text('range', shownRange !== null ? (shownRange / 100).toFixed(1) + ' 米' : '—');
       text('approach-time', confirmed ? `${confirmed.near_ms / 1000} 秒` : '—');
       updateDiagnosticsPolling();
       if (!el('backdrop').hidden) { showDetails(); renderDiagnostics(); }
       renderSettings();
     }
-    function disconnect(failed = true) { if (failed) connectionFailed = true; generation++; if (source) source.close(); source = null; clearTimeout(reconnectTimer); lastEvent = 0; render(); }
+    function disconnect(failed = true) { if (dirty) conflict = true; settingsNotice = ''; settingsResponseGeneration = -1; settingsEvidence.reset(); diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; if (failed) connectionFailed = true; generation++; if (source) source.close(); source = null; clearTimeout(reconnectTimer); lastEvent = 0; render(); }
     function connect() {
       disconnect(false); for (const id of Object.keys(states)) delete states[id]; for (const id of Object.keys(revisions)) delete revisions[id]; const current = generation; source = new EventSource('/events');
       source.onopen = () => { if (current !== generation) return; lastEvent = Date.now(); connectionFailed = false; hasConnected = true; retry = 1000; render(); readSettings().catch(() => {}); hydrate(current); };
@@ -678,12 +786,13 @@
       catch (_) { /* readSettings displays the failure */ }
     });
     async function submitSettings(defaults) {
-      if (!draft || conflict || settingsLock.active || !isAlive(lastEvent, Date.now())) return;
+      if (!draft || conflict || settingsLock.active || !isAlive(lastEvent, Date.now()) || !settingsData || !((settingsGeneration === generation && settingsData.status === 'ready') || currentErrorResponse())) return;
       await runExclusive(settingsLock, async () => {
         try {
           const current = await readSettings();
           if (conflict || current.revision !== draftRevision) throw new Error('conflict');
           if (current.status === 'applying') throw new Error('busy');
+          if (!((settingsGeneration === generation && current.status === 'ready') || currentErrorResponse())) throw new Error('stale response');
           const target = defaults ? { ...DEFAULT_SETTINGS } : { ...draft };
           const expected = current.revision, epoch = generation;
           const body = defaults ? { expected_revision: expected, action: 'defaults' } : { expected_revision: expected, settings: target };
@@ -731,7 +840,7 @@
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
       }
     });
-    function closeSheet() { calibrationRecording = false; calibrationSamples = []; el('backdrop').hidden = true; diagnosticsPoller.setActive(false); diagnostics = null; document.body.classList.remove('sheet-open'); el('main-content').inert = false; if (previousFocus) previousFocus.focus(); }
+    function closeSheet() { calibrationRecording = false; calibrationSamples = []; el('backdrop').hidden = true; document.body.classList.remove('sheet-open'); el('main-content').inert = false; if (previousFocus) previousFocus.focus(); }
     el('details-open').addEventListener('click', () => { previousFocus = document.activeElement; showDetails(); el('backdrop').hidden = false; el('main-content').inert = true; document.body.classList.add('sheet-open'); diagnosticsError = ''; renderDiagnostics(); updateDiagnosticsPolling(); el('details-close').focus(); });
     el('details-close').addEventListener('click', closeSheet);
     el('backdrop').addEventListener('click', e => { if (e.target === el('backdrop')) closeSheet(); });
@@ -744,8 +853,8 @@
         else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
       }
     });
-    document.addEventListener('visibilitychange', () => { updateDiagnosticsPolling(); if (!document.hidden) refresh(); else { calibrationRecording = false; calibrationSamples = []; diagnostics = null; renderDiagnostics(); } });
-    window.addEventListener('pagehide', () => diagnosticsPoller.setActive(false));
+    document.addEventListener('visibilitychange', () => { updateDiagnosticsPolling(); if (!document.hidden) refresh(); else { settingsEvidence.invalidate(); settingsGeneration = -1; settingsResponseGeneration = -1; settingsNotice = ''; calibrationRecording = false; calibrationSamples = []; diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; render(); } });
+    window.addEventListener('pagehide', () => { settingsEvidence.invalidate(); settingsGeneration = -1; settingsResponseGeneration = -1; settingsNotice = ''; diagnosticsPoller.setActive(false); diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; if (sceneFrame) cancelAnimationFrame(sceneFrame); sceneFrame = 0; distanceMotion.update({ presence: 'unknown' }, Date.now(), reducedMotion.matches); });
     window.addEventListener('beforeunload', event => { if (dirty || settingsLock.active) { event.preventDefault(); event.returnValue = ''; } });
     window.addEventListener('pageshow', e => { if (e.persisted) refresh(); });
     setInterval(() => { if (!document.hidden && !el('settings-backdrop').hidden && !settingsLock.active && isAlive(lastEvent, Date.now())) readSettings().catch(() => {}); }, 3000);

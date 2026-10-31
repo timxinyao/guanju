@@ -30,17 +30,17 @@ async function main() {
   let browser;
   try {
     const address = await waitForAddress(server);
-    browser = await chromium.launch({ executablePath: '/usr/bin/chromium', headless: true, args: ['--no-sandbox'] });
-    fs.mkdirSync('output/mobile-qa', { recursive: true });
-    const context = await browser.newContext({ viewport: { width: 402, height: 874 }, deviceScaleFactor: 1, recordVideo: { dir: 'output/mobile-qa', size: { width: 402, height: 874 } } });
+    browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || '/usr/bin/chromium', headless: true, args: ['--no-sandbox'] });
+    const output = process.env.MOBILE_OUTPUT || 'output/mobile-qa'; fs.mkdirSync(output, { recursive: true });
+    const context = await browser.newContext({ viewport: { width: 402, height: 874 }, deviceScaleFactor: 1, ...(process.env.MOBILE_VIDEO ? { recordVideo: { dir: output, size: { width: 402, height: 874 } } } : {}) });
     const page = await context.newPage(); const errors = []; page.on('pageerror', error => errors.push(String(error)));
     let diagnosticsRequests = 0; page.on('request', r => { if (r.url().endsWith('/diagnostics')) diagnosticsRequests++; });
     await page.goto(address); await page.locator('#trial:not(:disabled)').waitFor();
     await page.locator('#scene-explanation').waitFor({ timeout: 3000 });
     assert.match(await page.locator('#scene-explanation').textContent(), /没有近距离目标/);
-    await page.waitForTimeout(1200); assert.equal(diagnosticsRequests, 0, 'home must not poll diagnostics');
+    await page.waitForTimeout(1200); assert.ok(diagnosticsRequests > 0, 'home polls diagnostics for the scene');
     assert.match(await page.locator('#restore').textContent(), /恢复画面并停用/);
-    await page.screenshot({ path: 'output/mobile-qa/home.png' });
+    await page.screenshot({ path: path.join(output, 'home.png') });
     await page.locator('#settings-open').click(); assert.equal(await page.locator('#settings-close').textContent(), '关闭');
     assert.equal(await page.locator('#advanced-settings').getAttribute('open'), null);
     assert.ok(await page.locator('.timings .stepper button').evaluateAll(nodes => nodes.every(n => n.getBoundingClientRect().width >= 44 && n.getBoundingClientRect().height >= 44)), 'stepper touch targets must be at least 44 × 44');
@@ -52,21 +52,21 @@ async function main() {
     await page.locator('#settings-close').click(); await page.locator('#settings-discard').click();
     assert.equal(await page.locator('#settings-backdrop').isVisible(), false);
     await page.locator('#settings-open').click(); assert.equal(await page.locator('#near-value').textContent(), '3 秒');
-    await page.screenshot({ path: 'output/mobile-qa/settings.png' }); await page.locator('#settings-close').click();
+    await page.screenshot({ path: path.join(output, 'settings.png') }); await page.locator('#settings-close').click();
     await page.locator('#details-open').click(); await page.waitForTimeout(1200);
     assert.ok(diagnosticsRequests > 0); await page.locator('#diagnostic-distance').waitFor();
     assert.equal(await page.locator('#diagnostic-distance').textContent(), '—', 'absent never uses residual distances');
     await page.request.post(address + '/_fixture/Far'); await page.waitForTimeout(1400);
     assert.equal(await page.locator('#diagnostic-distance').textContent(), '约 2.5 米');
-    await page.screenshot({ path: 'output/mobile-qa/debug.png' });
+    await page.screenshot({ path: path.join(output, 'debug.png') });
     await page.locator('#details-close').click(); const closedReads = diagnosticsRequests;
-    await page.waitForTimeout(1200); assert.equal(diagnosticsRequests, closedReads, 'closing stops diagnostic polling');
+    await page.waitForTimeout(1200); assert.ok(diagnosticsRequests > closedReads, 'home keeps polling after details close');
     for (const size of [{ width: 320, height: 700 }, { width: 390, height: 844 }, { width: 430, height: 932 }, { width: 1280, height: 900 }]) {
       await page.setViewportSize(size); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-      await page.screenshot({ path: `output/mobile-qa/home-${size.width}.png` });
+      await page.screenshot({ path: path.join(output, `home-${size.width}.png`) });
     }
     assert.deepEqual(errors, []);
-    const video = page.video(); await context.close(); console.log('Recording:', await video.path());
+    const video = page.video(); await context.close(); if (video) console.log('Recording:', await video.path());
     console.log('Real browser mobile layouts, settings guard and diagnostic lifecycle passed.');
   } finally { if (browser) await browser.close(); await stopProcess(server); }
 }
