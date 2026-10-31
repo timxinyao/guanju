@@ -46,26 +46,10 @@
 .scene[data-tv="standby"] .screen-overlay,.scene[data-tv="offline"] .screen-overlay{fill:#a8b0aa}
 .scene[data-tv="unknown"] .screen-overlay,.scene[data-tv="connecting"] .screen-overlay{fill:#e7d3a7}
 .scene[data-tv="fault"] .screen-overlay{fill:#d8a29b}
-.scene-actor{opacity:0;transform:translate(0px,0px);transition:opacity .18s ease;transform-box:view-box}
-.scene[data-state="near"] .scene-actor,.scene[data-state="far"] .scene-actor{opacity:1}
-.scene[data-state="far"] .scene-actor{transform:translate(0px,52px)}
-.actor-body{transform-box:view-box;transform-origin:180px 153px;transition:transform .2s ease}
-.scene[data-state="far"]:not(.running) .actor-body{transform:scale(.9,.82)}
-.actor-arm,.actor-leg{transform-box:view-box;transform-origin:180px 139px}
-.scene.running .arm-left,.scene.running .leg-right{animation:limb-step .3s ease-in-out infinite alternate}
-.scene.running .arm-right,.scene.running .leg-left{animation:limb-step .3s ease-in-out infinite alternate-reverse}
-.scene.running .actor-body{animation:actor-bounce .3s ease-in-out infinite alternate}
-@keyframes limb-step{from{transform:rotate(-16deg)}to{transform:rotate(16deg)}}
-@keyframes actor-bounce{from{transform:translateY(0)}to{transform:translateY(-3px)}}
-@media(prefers-reduced-motion:reduce){.scene-actor,.actor-body{transition:none!important}.scene.running .actor-body,.scene.running .actor-arm,.scene.running .actor-leg{animation:none!important}}
 /* A single status line; connection status remains available to assistive technology. */
 .summary h2{display:flex;align-items:center;gap:10px;margin:0}
 .summary .dot{display:inline-block;flex:none}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-/* Place the seated figure in front of the sofa and show bent legs on its cushion. */
-.seated-legs{display:none}
-.scene[data-state="far"]:not(.running) .seated-legs{display:block}
-.scene[data-state="far"]:not(.running) .actor-leg{display:none}
 /* Phone-first refinement: preserve the original scene, give everyday actions room. */
 :root{--green:#315b43;--ink:#18291f;--muted:#6f8076;--soft:#edf3ef}
 .app-shell{width:min(100%,460px);padding-left:max(22px,env(safe-area-inset-left,0px));padding-right:max(22px,env(safe-area-inset-right,0px));gap:0}
@@ -84,3 +68,6 @@
 @media(max-width:350px){.app-shell{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.header-actions{gap:4px}.topbar h1{font-size:29px}.summary h2{font-size:26px}.control-panel{padding:13px 10px;gap:9px}.control-copy h3{font-size:17px}.tv-icon{width:38px;height:38px}.control-copy p{font-size:11px}.sheet{padding-left:16px;padding-right:16px}.settings-card{padding-left:12px;padding-right:12px}.timing-row>span{font-size:15px}.stepper button{width:44px}.diagnostic-main #diagnostic-distance{font-size:19px}.diagnostic-main dt{font-size:14px}}
 /* Compact landscape keeps the actions reachable when there is little height. */
 @media(max-height:480px) and (orientation:landscape){.app-shell{padding-top:calc(4px + env(safe-area-inset-top,0px));padding-bottom:calc(4px + env(safe-area-inset-bottom,0px))}.summary{margin-top:4px}.summary>p{margin-top:2px}.scene,.footer{display:none}.control-panel{min-height:60px;padding:8px 14px}.rules{margin:4px 0}.rules strong{font-size:18px;line-height:1.1}.rules span{font-size:12px}.pause-controls{margin:0}.restore button{min-height:44px}}
+
+/* Fresh radar frames animate the wave; no animation runs for stale data. */
+.scene .wave{opacity:0}.scene[data-monitoring="true"] .wave{animation:scene-wave 3s ease-in-out infinite}.scene .wave-two{animation-delay:.45s!important}.scene .wave-three{animation-delay:.9s!important}.scene .wave-four{animation-delay:1.35s!important}@keyframes scene-wave{0%,100%{opacity:.2}45%{opacity:.8}}@media(prefers-reduced-motion:reduce){.scene[data-monitoring="true"] .wave{animation:none;opacity:.55}}

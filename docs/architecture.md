@@ -10,7 +10,7 @@ ESP32-C3 运行 ESPHome，LD2410C 经 GPIO20/21 的硬件 UART 提供雷达数�
 
 `GET /settings` 返回 `revision`、`status`、`phase`、已保存 `settings`，事务中还可能有 `pending` 和错误。`POST /settings` 使用 `expected_revision` 和完整设置（或 `action: defaults`），仅接受合法范围且空闲、版本匹配的请求；冲突时应重新读取。提交返回 `202 Accepted` 后，设备先处理画面恢复，再向雷达写入并回读各阶段，全部匹配且数据新鲜并完成 NVS 保存后才变为 `ready`、更新版本。失败或未确认时监测暂停，不能将 HTTP 200 当成设置完成。
 
-网页从设备提供 CSS/JS，消费 `/events` 的 SSE 原始实体名称（例如 `binary_sensor/Radar Data Fresh`），结合心跳、新鲜度和设置派生展示。雷达波纹只反映数据新鲜在线，不说明自动监测生效；近/远/无人图为示意。右上刷新执行整个页面 reload。设备提供三个 PNG 图标路由：`/apple-touch-icon.png`、`/apple-touch-icon-v1.png` 和 `/apple-touch-icon-precomposed.png`。已有主屏幕图标可能缓存，需移除重加。
+网页从设备提供 CSS/JS，消费 `/events` 的 SSE 原始实体名称（例如 `binary_sensor/Radar Data Fresh`），结合心跳、新鲜度和设置派生展示。首页与详情共享前台串行诊断轮询；仅新鲜、可判定的同一快照及有效目标类别距离驱动人物，未知或过期不推断为无人。距离投影、扒柜和坐姿仅为示意，不改变控制逻辑。雷达波纹只反映诊断中的雷达数据新鲜，不说明自动监测生效。右上刷新执行整个页面 reload。设备提供三个 PNG 图标路由：`/apple-touch-icon.png`、`/apple-touch-icon-v1.png` 和 `/apple-touch-icon-precomposed.png`。已有主屏幕图标可能缓存，需移除重加。
 
 正式 YAML 配置原生 ESPHome OTA，未启用网页 OTA、Home Assistant 原生 API 或配网门户。观察版和联网观察版不控制电视，具体阶段及命令见[入门](getting-started.md)。实现细节以 `firmware/tv_trial_runtime.h`、`tv_trial_controller.h`、`tv_trial_settings*.h` 和 `firmware/ui/` 为准。
 
