@@ -6,6 +6,8 @@ The production firmware serves its own webpage. On a trusted LAN, open `http://<
 
 ## Understanding status
 
+The home view stays fixed in the first viewport. Settings and debug panels scroll internally.
+
 The automatic-function switch represents the user's **intent**, not a guarantee that monitoring is active. Startup, TV standby or disconnection, stale or unknown radar data, and unverified settings can pause monitoring while intent remains ON; the device will not wake the TV. The home screen keeps TV status, a device-derived scene explanation, near range and approach confirmation time. The top-right details button opens “调试模式” (debug mode) for health details and pause reasons. The radar ripple means fresh data is online; it does not mean automatic picture-off is active. The near, far and absent person illustrations are only indicative, not a child's identity or precise posture.
 
 The home scene explanation comes from device state: unknown is not guessed to mean absent, and there is no invented trigger countdown. During brief uncertainty about TV state, the page can retain the last confirmed picture presentation for up to 5 seconds within the same connection; continuous uncertainty then shows an unconfirmed state. Repeated unknown values do not extend the deadline. This cache affects presentation only: it does not alter device control, monitoring or command success. Disconnect, heartbeat expiry, reconnection or an explicit TV communication/command failure immediately invalidates the previous presentation. The girl running between the TV and sofa illustrates near/far states, not a real angle, identity or movement path. The system reduced-motion preference uses stable end poses.

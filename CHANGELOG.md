@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- Keep the home view fixed within the viewport while preserving internal settings and debug panel scrolling.
+
 - Refine the phone UI while retaining the forest-green illustrated scene: plain current-state explanation, explicit restore-and-disable, secondary pause controls, settings Close with draft protection and collapsed advanced controls.
 - Add temporary 10/30-minute snooze with health-gated resumption, external-picture-restoration courtesy, a provisional 20 cm release margin, fresh supporting observations and bounded parameter-audit deadlines. Unknown/stale observations never imply absence.
 - Add bounded optional diagnostics, a 12-event RAM history, foreground-only serialized polling with cancellation/backoff, and local four-step guided observation that never applies settings. Distances remain approximate; snapshots are not lossless radar recording. No new hardware or real-iPhone validation is implied.
