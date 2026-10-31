@@ -127,6 +127,7 @@
         current = next; version++; return true;
       },
       matches: revision => !current || (current.ready && revision === current.revision),
+      sameRevision: revision => !!current && revision === current.revision,
       session: () => current && current.session,
       token: () => version,
       invalidate() { version++; },
@@ -460,7 +461,7 @@
     if (!supportsNativeSwitch(HTMLInputElement.prototype)) el('trial').classList.add('switch-fallback');
     const controlLock = { active: false }, refreshLock = { active: false }, settingsLock = { active: false }, recoveryLock = { active: false };
     let source = null, lastEvent = 0, reconnectTimer = 0, retry = 1000, generation = 0, toastTimer = 0;
-    let settingsData = null, settingsGeneration = -1, settingsRead = null, settingsMutation = 0, draft = null, draftRevision = null, dirty = false, conflict = false, settingsNotice = '';
+    let settingsData = null, settingsGeneration = -1, settingsResponseGeneration = -1, settingsResponseAt = 0, settingsRead = null, settingsMutation = 0, draft = null, draftRevision = null, dirty = false, conflict = false, settingsNotice = '';
     let previousFocus = null, diagnostics = null, diagnosticsAt = 0, diagnosticsError = '', diagnosticsCache = null;
     let calibrationStep = -1, calibrationRecording = false, calibrationSamples = [], calibrationLast = '', calibrationSession = '', calibrationResults = [];
     const calibrationSteps = [{ title: '站在希望提醒的近处', expected: 'near' }, { title: '退到正常观看位置', expected: 'far' }, { title: '在观看位置安静坐好', expected: 'far' }, { title: '离开雷达覆盖区域', expected: 'absent' }];
@@ -477,11 +478,11 @@
       const previousSession = settingsEvidence.session();
       const changed = diagnosticsCache !== previous && settingsEvidence.observe(diagnostics);
       if (changed) {
-        settingsGeneration = -1; settingsNotice = '';
+        settingsGeneration = -1; settingsResponseGeneration = -1; settingsNotice = '';
         if (dirty && ((previousSession && previousSession !== diagnostics.session_id) || draftRevision !== diagnostics.config_revision)) conflict = true;
       }
       collectCalibration(); render();
-      if (changed && diagnostics.health.settings_ready && !document.hidden && !settingsLock.active) readSettings().catch(() => {});
+      if (changed && !document.hidden && !settingsLock.active) readSettings().catch(() => {});
     }, onError: error => { diagnosticsError = error.status === 404 ? '当前固件不支持诊断，请更新固件。' : error.status === 429 ? '设备繁忙，正在减慢更新。' : '诊断暂不可用，正在重试。'; render(); } });
     function updateDiagnosticsPolling() { diagnosticsPoller.setActive(!document.hidden && isAlive(lastEvent, Date.now())); }
     function setState(data, expected = generation) { if (applyVersionedState(states, revisions, data, expected, generation)) render(); }
@@ -493,7 +494,8 @@
     }
     function syncSettings(data, epoch) {
       if (epoch !== generation || !validEnvelope(data)) throw new Error('invalid settings');
-      settingsData = data; settingsGeneration = !document.hidden && settingsEvidence.matches(data.revision) ? epoch : -1;
+      settingsData = data; settingsGeneration = !document.hidden && data.status !== 'error' && settingsEvidence.matches(data.revision) ? epoch : -1;
+      settingsResponseGeneration = !document.hidden && data.status === 'error' && settingsEvidence.sameRevision(data.revision) ? epoch : -1; settingsResponseAt = Date.now();
       if (dirty && draftRevision !== data.revision) conflict = true;
       if (!dirty && data.status !== 'applying') { draft = { ...data.settings }; draftRevision = data.revision; conflict = false; }
       render();
@@ -510,7 +512,7 @@
           return syncSettings(data, epoch);
         } catch (error) {
           if (epoch === generation && mutation === settingsMutation && evidence === settingsEvidence.token()) {
-            settingsGeneration = -1;
+            settingsGeneration = -1; settingsResponseGeneration = -1;
             settingsNotice = error.status === 404 ? '当前固件不支持参数设置，请更新固件。' : '无法读取设备参数，请刷新后重试。';
             render();
           }
@@ -522,8 +524,16 @@
       reading.finally(() => { if (settingsRead === entry) settingsRead = null; }).catch(() => {});
       return reading;
     }
+    // An Error envelope can authorize retry only while its diagnostic session and revision are current.
+    // It must never make the saved settings a verified home-display fallback.
+    function currentErrorResponse(now = Date.now()) {
+      const view = diagnosticView(diagnostics, diagnosticsAt, now);
+      return !!settingsData && settingsData.status === 'error' && settingsResponseGeneration === generation &&
+        !document.hidden && isAlive(lastEvent, now) && now >= settingsResponseAt && now - settingsResponseAt <= 3500 &&
+        view.fresh && !diagnostics.health.settings_ready && settingsEvidence.sameRevision(settingsData.revision);
+    }
     function renderSettings() {
-      const alive = isAlive(lastEvent, Date.now()), current = settingsGeneration === generation && settingsData;
+      const alive = isAlive(lastEvent, Date.now()), current = (settingsGeneration === generation || currentErrorResponse()) && settingsData;
       let message = settingsNotice;
       if (!message && conflict) message = '设备参数已改变。重新加载将丢弃未应用的修改。';
       else if (!message && current && current.status === 'applying') message = '正在应用并验证参数，监测暂时暂停。';
@@ -533,7 +543,7 @@
       else if (!message) message = '参数已由设备确认。';
       text('settings-message', message);
       el('settings-reload').hidden = !conflict;
-      el('settings-apply').disabled = !current || current.status !== 'ready' || !dirty;
+      el('settings-apply').disabled = !current || !['ready', 'error'].includes(current.status) || !dirty;
       el('settings-fields').disabled = !draft || !alive || !current || current.status === 'applying' || settingsLock.active || conflict;
       if (!draft) return;
       el('distance').value = draft.distance_cm;
@@ -692,7 +702,7 @@
       if (!el('backdrop').hidden) { showDetails(); renderDiagnostics(); }
       renderSettings();
     }
-    function disconnect(failed = true) { if (dirty) conflict = true; settingsNotice = ''; settingsEvidence.reset(); diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; if (failed) connectionFailed = true; generation++; if (source) source.close(); source = null; clearTimeout(reconnectTimer); lastEvent = 0; render(); }
+    function disconnect(failed = true) { if (dirty) conflict = true; settingsNotice = ''; settingsResponseGeneration = -1; settingsEvidence.reset(); diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; if (failed) connectionFailed = true; generation++; if (source) source.close(); source = null; clearTimeout(reconnectTimer); lastEvent = 0; render(); }
     function connect() {
       disconnect(false); for (const id of Object.keys(states)) delete states[id]; for (const id of Object.keys(revisions)) delete revisions[id]; const current = generation; source = new EventSource('/events');
       source.onopen = () => { if (current !== generation) return; lastEvent = Date.now(); connectionFailed = false; hasConnected = true; retry = 1000; render(); readSettings().catch(() => {}); hydrate(current); };
@@ -776,12 +786,13 @@
       catch (_) { /* readSettings displays the failure */ }
     });
     async function submitSettings(defaults) {
-      if (!draft || conflict || settingsLock.active || settingsGeneration !== generation || !settingsData || settingsData.status !== 'ready' || !isAlive(lastEvent, Date.now())) return;
+      if (!draft || conflict || settingsLock.active || !isAlive(lastEvent, Date.now()) || !settingsData || !((settingsGeneration === generation && settingsData.status === 'ready') || currentErrorResponse())) return;
       await runExclusive(settingsLock, async () => {
         try {
           const current = await readSettings();
           if (conflict || current.revision !== draftRevision) throw new Error('conflict');
           if (current.status === 'applying') throw new Error('busy');
+          if (!((settingsGeneration === generation && current.status === 'ready') || currentErrorResponse())) throw new Error('stale response');
           const target = defaults ? { ...DEFAULT_SETTINGS } : { ...draft };
           const expected = current.revision, epoch = generation;
           const body = defaults ? { expected_revision: expected, action: 'defaults' } : { expected_revision: expected, settings: target };
@@ -842,8 +853,8 @@
         else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
       }
     });
-    document.addEventListener('visibilitychange', () => { updateDiagnosticsPolling(); if (!document.hidden) refresh(); else { settingsEvidence.invalidate(); settingsGeneration = -1; settingsNotice = ''; calibrationRecording = false; calibrationSamples = []; diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; render(); } });
-    window.addEventListener('pagehide', () => { settingsEvidence.invalidate(); settingsGeneration = -1; settingsNotice = ''; diagnosticsPoller.setActive(false); diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; if (sceneFrame) cancelAnimationFrame(sceneFrame); sceneFrame = 0; distanceMotion.update({ presence: 'unknown' }, Date.now(), reducedMotion.matches); });
+    document.addEventListener('visibilitychange', () => { updateDiagnosticsPolling(); if (!document.hidden) refresh(); else { settingsEvidence.invalidate(); settingsGeneration = -1; settingsResponseGeneration = -1; settingsNotice = ''; calibrationRecording = false; calibrationSamples = []; diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; render(); } });
+    window.addEventListener('pagehide', () => { settingsEvidence.invalidate(); settingsGeneration = -1; settingsResponseGeneration = -1; settingsNotice = ''; diagnosticsPoller.setActive(false); diagnostics = null; diagnosticsCache = null; diagnosticsAt = 0; if (sceneFrame) cancelAnimationFrame(sceneFrame); sceneFrame = 0; distanceMotion.update({ presence: 'unknown' }, Date.now(), reducedMotion.matches); });
     window.addEventListener('beforeunload', event => { if (dirty || settingsLock.active) { event.preventDefault(); event.returnValue = ''; } });
     window.addEventListener('pageshow', e => { if (e.persisted) refresh(); });
     setInterval(() => { if (!document.hidden && !el('settings-backdrop').hidden && !settingsLock.active && isAlive(lastEvent, Date.now())) readSettings().catch(() => {}); }, 3000);

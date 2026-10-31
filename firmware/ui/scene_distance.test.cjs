@@ -14,10 +14,10 @@ const frame = {
   reason:'',snooze_remaining_ms:0,recent_events:[],events_dropped:0
 };
 const evidence=createSettingsEvidence(); const initialToken=evidence.token();
-assert.equal(evidence.matches(1),true);assert.equal(evidence.observe(frame),true);assert.notEqual(evidence.token(),initialToken);assert.equal(evidence.matches(1),true);
+assert.equal(evidence.matches(1),true);assert.equal(evidence.sameRevision(1),false,'Error recovery needs an observed session');assert.equal(evidence.observe(frame),true);assert.notEqual(evidence.token(),initialToken);assert.equal(evidence.matches(1),true);
 assert.equal(evidence.observe({...frame,sequence:2}),false,'same configuration cannot restart reads');
 assert.equal(evidence.observe({...frame,config_revision:2}),true);assert.equal(evidence.matches(1),false);assert.equal(evidence.matches(2),true);
-assert.equal(evidence.observe({...frame,config_revision:2,health:{...frame.health,settings_ready:false}}),true);assert.equal(evidence.matches(2),false,'not-ready settings are untrusted');
+assert.equal(evidence.observe({...frame,config_revision:2,health:{...frame.health,settings_ready:false}}),true);assert.equal(evidence.matches(2),false,'not-ready settings are untrusted');assert.equal(evidence.sameRevision(2),true,'same revision can be considered separately for Error recovery');assert.equal(evidence.sameRevision(1),false);
 const oldToken=evidence.token();assert.equal(evidence.observe({...frame,session_id:'new-boot',config_revision:2}),true);assert.notEqual(evidence.token(),oldToken,'new session invalidates in-flight reads');
 const beforeReset=evidence.token();evidence.reset();assert.notEqual(evidence.token(),beforeReset,'connection generation invalidates in-flight reads');
 assert.deepEqual(sceneObservation(frame,1000,1000,true),{presence:'present',distanceCm:200});
