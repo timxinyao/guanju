@@ -6,7 +6,7 @@ The production firmware serves its own webpage. On a trusted LAN, open `http://<
 
 ## Understanding status
 
-The home view stays fixed in the first viewport. Settings and debug panels scroll internally.
+The home view stays fixed in the first viewport. Settings and debug panels scroll internally. On very short landscape screens, the scene illustration and footer are hidden to keep controls accessible.
 
 The automatic-function switch represents the user's **intent**, not a guarantee that monitoring is active. Startup, TV standby or disconnection, stale or unknown radar data, and unverified settings can pause monitoring while intent remains ON; the device will not wake the TV. The home screen keeps TV status, a device-derived scene explanation, near range and approach confirmation time. The top-right details button opens “调试模式” (debug mode) for health details and pause reasons. The radar ripple means fresh data is online; it does not mean automatic picture-off is active. The near, far and absent person illustrations are only indicative, not a child's identity or precise posture.
 

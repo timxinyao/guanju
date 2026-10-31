@@ -17,6 +17,8 @@ async function main() {
     const output = process.env.VIEWPORT_OUTPUT;
     if (output) fs.mkdirSync(output, { recursive: true });
     for (const { size, topInset, bottomInset } of [
+      { size: { width: 844, height: 390 }, topInset: 0, bottomInset: 0 },
+      { size: { width: 844, height: 390 }, topInset: 0, bottomInset: 21 },
       { size: { width: 320, height: 700 }, topInset: 59, bottomInset: 34 },
       { size: { width: 402, height: 874 }, topInset: 59, bottomInset: 34 },
       { size: { width: 1280, height: 900 }, topInset: 59, bottomInset: 34 },
@@ -37,6 +39,24 @@ async function main() {
         const rect = selector => { const r = document.querySelector(selector).getBoundingClientRect(); return { top: r.top, bottom: r.bottom, height: r.height }; };
         return { scrollY, scrollHeight: document.documentElement.scrollHeight, height: innerHeight, header: rect('.topbar'), restore: rect('#restore'), footer: rect('.footer') };
       });
+      async function checkLandscapeActions() {
+        if (!(await page.locator('#trial').isChecked())) await page.locator('#trial').click();
+        await page.locator('#pause-10:not(:disabled)').waitFor();
+        for (const selector of ['#pause-10', '#pause-30', '#restore']) {
+          const target = page.locator(selector);
+          const hit = await target.evaluate(el => {
+            const r = el.getBoundingClientRect();
+            const node = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            return { width: r.width, height: r.height, bottom: r.bottom, hit: node === el || el.contains(node) };
+          });
+          assert.ok(hit.width >= 44 && hit.height >= 44 && hit.bottom <= 390 - bottomInset && hit.hit, `${selector} must be fully reachable and hit-testable: ${JSON.stringify(hit)}`);
+        }
+        await page.locator('#pause-10').click(); await page.locator('#resume:visible').waitFor();
+        await page.locator('#resume').click(); await page.locator('#resume').waitFor({ state: 'hidden' });
+        await page.locator('#restore').click();
+        await page.locator('#trial:not(:checked)').waitFor();
+      }
+      if (size.width === 844) await checkLandscapeActions();
       const before = await measure();
       if (output) await page.screenshot({ path: path.join(output, `home-${size.width}-inset-${topInset}.png`) });
       await page.mouse.move(size.width / 2, size.height / 2); await page.mouse.wheel(0, 800); await page.waitForTimeout(150);
@@ -89,6 +109,11 @@ async function main() {
       const resized = await measure();
       assert.equal(resized.scrollY, 0, 'resize must not move home');
       assert.ok(resized.restore.bottom <= 874 - bottomInset && resized.footer.bottom <= 874 - bottomInset, 'resize keeps controls in the usable viewport');
+      if (size.width === 402 && topInset === 0) {
+        await page.setViewportSize({ width: 844, height: 390 });
+        await checkLandscapeActions();
+        assert.equal((await measure()).scrollY, 0, 'landscape resize must not move home');
+      }
       assert.deepEqual(errors, []);
       const video = page.video();
       if (video) await page.waitForTimeout(1000);
